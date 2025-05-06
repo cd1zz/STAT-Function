@@ -8,7 +8,7 @@ def execute_similarincidents_module(req_body):
     """
     Execute the Similar Incidents module to find and analyze related past incidents.
     
-    This module identifies similar incidents by comparing entities, titles, and tactics,
+    This module identifies similar incidents by comparing tactics and titles,
     then analyzes their resolution status and provides statistics for patterns.
     """
     # Initialize the base module and load input data
@@ -24,7 +24,7 @@ def execute_similarincidents_module(req_body):
     max_incidents = req_body.get('MaxIncidents', 50)
     
     # Get match parameters
-    match_by_entity = req_body.get('MatchByEntity', True)
+    match_by_entity = req_body.get('MatchByEntity', False)  # Entities not directly in incident
     match_by_title = req_body.get('MatchByTitle', True)
     match_by_tactics = req_body.get('MatchByTactics', True)
     
@@ -68,15 +68,6 @@ def get_current_incident_details(base_object):
     path = f'{base_object.IncidentARMId}?api-version=2023-02-01'
     current_incident = json.loads(rest.rest_call_get(base_object, 'arm', path).content)
     
-    # Extract entity information
-    entity_types = {
-        'accounts': [account.get('userPrincipalName', '') for account in base_object.Accounts if account.get('userPrincipalName')],
-        'ips': [ip.get('Address', '') for ip in base_object.IPs if ip.get('Address')],
-        'hosts': [host.get('FQDN', '') for host in base_object.Hosts if host.get('FQDN')],
-        'domains': [domain.get('Domain', '') for domain in base_object.Domains if domain.get('Domain')],
-        'filehashes': [hash.get('FileHash', '') for hash in base_object.FileHashes if hash.get('FileHash')]
-    }
-    
     # Extract tactics from the related analytic rules
     tactics = []
     for alert in base_object.Alerts:
@@ -93,7 +84,6 @@ def get_current_incident_details(base_object):
         'severity': current_incident['properties'].get('severity', ''),
         'status': current_incident['properties'].get('status', ''),
         'tactics': tactics,
-        'entities': entity_types,
         'createdTime': current_incident['properties'].get('createdTimeUtc', '')
     }
 
@@ -101,7 +91,7 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
     """
     Search for incidents similar to the current one.
     
-    Similarity is determined by common entities, similar titles, and matching tactics.
+    Similarity is determined by similar titles and matching tactics.
     """
     # Calculate the lookback date
     lookback_date = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -112,15 +102,6 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
     let lookbackDate = datetime({lookback_date});
     let maxIncidents = {max_incidents};
     """
-    
-    # Add entity tables to the query if we're matching by entity
-    if match_by_entity:
-        for entity_type, entities in current_incident['entities'].items():
-            if entities:
-                entity_str = ", ".join([f"'{entity}'" for entity in entities])
-                query += f"""
-                let current_{entity_type} = dynamic([{entity_str}]);
-                """
     
     # Add title and tactics if we're matching by those
     if match_by_title:
@@ -151,86 +132,29 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
     | summarize arg_max(TimeGenerated, *) by IncidentName // Get latest state for each incident
     """
     
+    # Add data extraction and match calculation
+    query += """
+    | extend AdditionalDataObj = parse_json(tostring(AdditionalData))
+    | extend Tactics = AdditionalDataObj.tactics
+    | extend Techniques = AdditionalDataObj.techniques
+    """
+    
     # Add match calculation based on selected criteria
     match_conditions = []
-    
-    if match_by_entity:
-        # Add entity matching conditions
-        entity_conditions = []
-        
-        # Account matching
-        if current_incident['entities']['accounts']:
-            entity_conditions.append("""
-            | extend AccountEntities = extract_json("$.entities.accounts", tostring(AdditionalData), dynamic([]))
-            | extend AccountMatchCount = array_length(set_intersect(AccountEntities, current_accounts))
-            | extend TotalCurrentAccounts = array_length(current_accounts)
-            | extend AccountMatchScore = iff(TotalCurrentAccounts > 0, 1.0 * AccountMatchCount / TotalCurrentAccounts, 0)
-            """)
-            match_conditions.append("AccountMatchScore")
-        
-        # IP matching
-        if current_incident['entities']['ips']:
-            entity_conditions.append("""
-            | extend IPEntities = extract_json("$.entities.ips", tostring(AdditionalData), dynamic([]))
-            | extend IPMatchCount = array_length(set_intersect(IPEntities, current_ips))
-            | extend TotalCurrentIPs = array_length(current_ips)
-            | extend IPMatchScore = iff(TotalCurrentIPs > 0, 1.0 * IPMatchCount / TotalCurrentIPs, 0)
-            """)
-            match_conditions.append("IPMatchScore")
-        
-        # Host matching
-        if current_incident['entities']['hosts']:
-            entity_conditions.append("""
-            | extend HostEntities = extract_json("$.entities.hosts", tostring(AdditionalData), dynamic([]))
-            | extend HostMatchCount = array_length(set_intersect(HostEntities, current_hosts))
-            | extend TotalCurrentHosts = array_length(current_hosts)
-            | extend HostMatchScore = iff(TotalCurrentHosts > 0, 1.0 * HostMatchCount / TotalCurrentHosts, 0)
-            """)
-            match_conditions.append("HostMatchScore")
-        
-        # Domain matching
-        if current_incident['entities']['domains']:
-            entity_conditions.append("""
-            | extend DomainEntities = extract_json("$.entities.domains", tostring(AdditionalData), dynamic([]))
-            | extend DomainMatchCount = array_length(set_intersect(DomainEntities, current_domains))
-            | extend TotalCurrentDomains = array_length(current_domains)
-            | extend DomainMatchScore = iff(TotalCurrentDomains > 0, 1.0 * DomainMatchCount / TotalCurrentDomains, 0)
-            """)
-            match_conditions.append("DomainMatchScore")
-        
-        # FileHash matching
-        if current_incident['entities']['filehashes']:
-            entity_conditions.append("""
-            | extend FileHashEntities = extract_json("$.entities.filehashes", tostring(AdditionalData), dynamic([]))
-            | extend FileHashMatchCount = array_length(set_intersect(FileHashEntities, current_filehashes))
-            | extend TotalCurrentFileHashes = array_length(current_filehashes)
-            | extend FileHashMatchScore = iff(TotalCurrentFileHashes > 0, 1.0 * FileHashMatchCount / TotalCurrentFileHashes, 0)
-            """)
-            match_conditions.append("FileHashMatchScore")
-        
-        # Apply all entity conditions
-        for condition in entity_conditions:
-            query += condition
     
     # Title matching
     if match_by_title:
         query += """
-        | extend TitleSimilarity = iff(Title contains currentTitle or currentTitle contains Title, 0.8, 0)
+        | extend TitleSimilarity = iff(Title contains currentTitle or currentTitle contains Title, 0.8, 0.0)
         """
         match_conditions.append("TitleSimilarity")
     
     # Tactics matching
     if match_by_tactics and current_incident['tactics']:
         query += """
-        | extend IncidentTactics = todynamic(RelatedAnalyticRuleIds)
-        | mv-expand IncidentTactics to typeof(string)
-        | extend IncidentTactics = extract("tactics\":([^\\]]*)", 1, tostring(IncidentTactics))
-        | extend IncidentTactics = replace_string(replace_string(IncidentTactics, "\"", ""), "[", "")
-        | extend IncidentTactics = split(IncidentTactics, ",")
-        | summarize Tactics = any(IncidentTactics) by IncidentName, IncidentNumber, Title, Severity, Status, Classification, ClassificationComment, ClassificationReason, IncidentUrl, CreatedTime, LastModifiedTime, ClosedTime, FirstActivityTime, LastActivityTime, AccountMatchScore, IPMatchScore, HostMatchScore, DomainMatchScore, FileHashMatchScore, TitleSimilarity
         | extend TacticMatchCount = array_length(set_intersect(Tactics, currentTactics))
         | extend TotalCurrentTactics = array_length(currentTactics)
-        | extend TacticsMatchScore = iff(TotalCurrentTactics > 0, 1.0 * TacticMatchCount / TotalCurrentTactics, 0)
+        | extend TacticsMatchScore = iff(TotalCurrentTactics > 0, toreal(TacticMatchCount) / toreal(TotalCurrentTactics), 0.0)
         """
         match_conditions.append("TacticsMatchScore")
     
@@ -239,13 +163,13 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
         similarity_expr = " + ".join(match_conditions)
         divisor = len(match_conditions)
         query += f"""
-        | extend SimilarityScore = ({similarity_expr}) / {divisor}
+        | extend SimilarityScore = ({similarity_expr}) / {divisor}.0
         | where SimilarityScore >= {similarity_threshold}
         """
     else:
         # Fallback if no match conditions
         query += """
-        | extend SimilarityScore = 0
+        | extend SimilarityScore = 0.0
         """
     
     # Finalize query with sorting and limits
@@ -260,6 +184,7 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
              ClassificationReason,
              IncidentUrl,
              Tactics,
+             Techniques,
              FirstActivityTime,
              LastActivityTime,
              CreatedTime,
@@ -367,23 +292,6 @@ def analyze_similar_incidents(similar_incidents_obj, similar_incidents_data, cur
                 if tactic not in similar_incidents_obj.SimilarIncidentsByTactic:
                     similar_incidents_obj.SimilarIncidentsByTactic[tactic] = []
                 similar_incidents_obj.SimilarIncidentsByTactic[tactic].append(incident)
-    
-    # Group incidents by entity type for correlation
-    similar_incidents_obj.SimilarIncidentsByEntity = {}
-    for entity_type in ['accounts', 'ips', 'hosts', 'domains', 'filehashes']:
-        if current_incident['entities'][entity_type]:
-            similar_incidents_obj.SimilarIncidentsByEntity[entity_type] = []
-            for entity in current_incident['entities'][entity_type]:
-                matching_count = 0
-                for incident in similar_incidents_data:
-                    entity_field = f"{entity_type.capitalize()}Entities"
-                    if entity_field in incident and entity in incident[entity_field]:
-                        matching_count += 1
-                
-                similar_incidents_obj.SimilarIncidentsByEntity[entity_type].append({
-                    'EntityValue': entity,
-                    'IncidentCount': matching_count
-                })
 
 def add_incident_comment(base_object, similar_incidents):
     """

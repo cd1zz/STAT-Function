@@ -124,8 +124,9 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
     
     # Add title and tactics if we're matching by those
     if match_by_title:
+        sanitized_title = current_incident['title'].replace('"', "'")
         query += f"""
-        let currentTitle = "{current_incident['title'].replace('"', '\\"')}";
+        let currentTitle = "{sanitized_title}";
         """
     
     if match_by_tactics and current_incident['tactics']:
@@ -224,7 +225,7 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
         | extend IncidentTactics = todynamic(RelatedAnalyticRuleIds)
         | mv-expand IncidentTactics to typeof(string)
         | extend IncidentTactics = extract("tactics\":([^\\]]*)", 1, tostring(IncidentTactics))
-        | extend IncidentTactics = replace_string(IncidentTactics, "\"", "")
+        | extend IncidentTactics = replace_string(replace_string(IncidentTactics, "\"", ""), "[", "")
         | extend IncidentTactics = split(IncidentTactics, ",")
         | summarize Tactics = any(IncidentTactics) by IncidentName, IncidentNumber, Title, Severity, Status, Classification, ClassificationComment, ClassificationReason, IncidentUrl, CreatedTime, LastModifiedTime, ClosedTime, FirstActivityTime, LastActivityTime, AccountMatchScore, IPMatchScore, HostMatchScore, DomainMatchScore, FileHashMatchScore, TitleSimilarity
         | extend TacticMatchCount = array_length(set_intersect(Tactics, currentTactics))

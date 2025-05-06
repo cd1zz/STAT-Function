@@ -1,4 +1,4 @@
-name: Build and Upload STAT ZIP (OIDC Auth)
+name: Build and Upload STAT ZIP (OIDC Auth + Identity RunFromPackage)
 
 on:
   push:
@@ -16,14 +16,17 @@ on:
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
   PYTHON_VERSION: '3.10'
-  STORAGE_ACCOUNT: 'statgitbuildstorage'   
-  CONTAINER_NAME: 'statbuild'              
+  STORAGE_ACCOUNT: 'statgitbuildstorage'
+  CONTAINER_NAME: 'statbuild'
+  FUNCTION_APP: 'stat-umfcjsymwdhao'             
+  RESOURCE_GROUP: 'craig_group'         
+  ZIP_NAME: 'stat.zip'
 
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   
+      id-token: write
       contents: read
 
     steps:
@@ -45,7 +48,7 @@ jobs:
     - name: Create ZIP Package
       run: |
         cd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
-        zip -r stat.zip classes/ modules/ shared/ debug/ .python_packages/ host.json requirements.txt -x '*__pycache__*'
+        zip -r ${{ env.ZIP_NAME }} classes/ modules/ shared/ debug/ .python_packages/ host.json requirements.txt -x '*__pycache__*'
 
     - name: Azure Login with OIDC
       uses: azure/login@v1
@@ -59,7 +62,36 @@ jobs:
         az storage blob upload \
           --account-name ${{ env.STORAGE_ACCOUNT }} \
           --container-name ${{ env.CONTAINER_NAME }} \
-          --name ${{ github.ref_name }}-stat.zip \
-          --file '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/stat.zip' \
+          --name ${{ github.ref_name }}-${{ env.ZIP_NAME }} \
+          --file '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/${{ env.ZIP_NAME }}' \
           --overwrite \
           --auth-mode login
+
+    - name: Assign Managed Identity to Function App
+      run: |
+        az functionapp identity assign \
+          --name ${{ env.FUNCTION_APP }} \
+          --resource-group ${{ env.RESOURCE_GROUP }}
+
+    - name: Grant Blob Reader Role to Function App
+      run: |
+        PRINCIPAL_ID=$(az functionapp show \
+          --name ${{ env.FUNCTION_APP }} \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --query identity.principalId --output tsv)
+
+        BLOB_SCOPE="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.RESOURCE_GROUP }}/providers/Microsoft.Storage/storageAccounts/${{ env.STORAGE_ACCOUNT }}/blobServices/default/containers/${{ env.CONTAINER_NAME }}/blobs/${{ github.ref_name }}-${{ env.ZIP_NAME }}"
+
+        az role assignment create \
+          --assignee "$PRINCIPAL_ID" \
+          --role "Storage Blob Data Reader" \
+          --scope "$BLOB_SCOPE" || echo "Role assignment may already exist"
+
+    - name: Configure WEBSITE_RUN_FROM_PACKAGE with identity-based blob URL
+      run: |
+        BLOB_URL="https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net/${{ env.CONTAINER_NAME }}/${{ github.ref_name }}-${{ env.ZIP_NAME }}"
+
+        az functionapp config appsettings set \
+          --name ${{ env.FUNCTION_APP }} \
+          --resource-group ${{ env.RESOURCE_GROUP }} \
+          --settings WEBSITE_RUN_FROM_PACKAGE=$BLOB_URL

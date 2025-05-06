@@ -16,14 +16,14 @@ on:
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: '.'
   PYTHON_VERSION: '3.10'
-  STORAGE_ACCOUNT: 'statgitbuildstorage'   # <-- your storage account
-  CONTAINER_NAME: 'statbuild'              # <-- ensure this container exists
+  STORAGE_ACCOUNT: 'statgitbuildstorage'   
+  CONTAINER_NAME: 'statbuild'              
 
 jobs:
   build-and-upload:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # Required for OIDC
+      id-token: write   
       contents: read
 
     steps:

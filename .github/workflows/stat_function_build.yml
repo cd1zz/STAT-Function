@@ -1,4 +1,4 @@
-name: Build and Upload STAT ZIP (OIDC Auth + Identity RunFromPackage)
+name: Build and Upload STAT ZIP (OIDC Auth + RunFromPackage)
 
 on:
   push:
@@ -67,27 +67,7 @@ jobs:
           --overwrite \
           --auth-mode login
 
-    - name: Assign Managed Identity to Function App
-      run: |
-        az functionapp identity assign \
-          --name ${{ env.FUNCTION_APP }} \
-          --resource-group ${{ env.RESOURCE_GROUP }}
-
-    - name: Grant Blob Reader Role to Function App
-      run: |
-        PRINCIPAL_ID=$(az functionapp show \
-          --name ${{ env.FUNCTION_APP }} \
-          --resource-group ${{ env.RESOURCE_GROUP }} \
-          --query identity.principalId --output tsv)
-
-        BLOB_SCOPE="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.RESOURCE_GROUP }}/providers/Microsoft.Storage/storageAccounts/${{ env.STORAGE_ACCOUNT }}/blobServices/default/containers/${{ env.CONTAINER_NAME }}/blobs/${{ github.ref_name }}-${{ env.ZIP_NAME }}"
-
-        az role assignment create \
-          --assignee "$PRINCIPAL_ID" \
-          --role "Storage Blob Data Reader" \
-          --scope "$BLOB_SCOPE" || echo "Role assignment may already exist"
-
-    - name: Configure WEBSITE_RUN_FROM_PACKAGE with identity-based blob URL
+    - name: Configure WEBSITE_RUN_FROM_PACKAGE with blob URL
       run: |
         BLOB_URL="https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net/${{ env.CONTAINER_NAME }}/${{ github.ref_name }}-${{ env.ZIP_NAME }}"
 

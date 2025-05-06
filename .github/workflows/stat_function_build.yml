@@ -61,4 +61,5 @@ jobs:
           --container-name ${{ env.CONTAINER_NAME }} \
           --name ${{ github.ref_name }}-stat.zip \
           --file '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/stat.zip' \
-          --overwrite
+          --overwrite \
+          --auth-mode login

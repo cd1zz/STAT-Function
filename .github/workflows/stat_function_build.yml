@@ -70,7 +70,7 @@ jobs:
     - name: Configure WEBSITE_RUN_FROM_PACKAGE with blob URL
       run: |
         BLOB_URL="https://${{ env.STORAGE_ACCOUNT }}.blob.core.windows.net/${{ env.CONTAINER_NAME }}/${{ github.ref_name }}-${{ env.ZIP_NAME }}"
-
+        
         az functionapp config appsettings set \
           --name ${{ env.FUNCTION_APP }} \
           --resource-group ${{ env.RESOURCE_GROUP }} \

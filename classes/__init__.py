@@ -581,3 +581,39 @@ class DebugModule:
         self.STATVersion = data.get_current_version()
         self.Test = req_body.get('Test', 'Default')
         self.Params = req_body.get('Params', {})
+
+class SimilarIncidentsModule:
+    '''A Similar Incidents module object'''
+    
+    def __init__(self):
+        self.DetailedResults = []
+        self.SimilarIncidentsCount = 0
+        self.SimilarIncidentsFound = False
+        self.ModuleName = 'SimilarIncidentsModule'
+        self.TruePositiveCount = 0
+        self.FalsePositiveCount = 0
+        self.BenignPositiveCount = 0
+        self.UnresolvedCount = 0
+        self.HighestSimilarityScore = 0.0
+        self.MostCommonTactics = []
+        self.MostCommonTitle = ""
+        self.AverageResolutionTime = 0
+        self.SimilarIncidentsByTitle = {}
+        self.SimilarIncidentsByTactic = {}
+        self.SimilarIncidentsByEntity = {}
+    
+    def load_from_input(self, body):
+        self.DetailedResults = body['DetailedResults']
+        self.SimilarIncidentsCount = body['SimilarIncidentsCount']
+        self.SimilarIncidentsFound = body['SimilarIncidentsFound']
+        self.TruePositiveCount = body['TruePositiveCount']
+        self.FalsePositiveCount = body['FalsePositiveCount']
+        self.BenignPositiveCount = body['BenignPositiveCount']
+        self.UnresolvedCount = body['UnresolvedCount']
+        self.HighestSimilarityScore = body['HighestSimilarityScore']
+        self.MostCommonTactics = body['MostCommonTactics']
+        self.MostCommonTitle = body['MostCommonTitle']
+        self.AverageResolutionTime = body['AverageResolutionTime']
+        self.SimilarIncidentsByTitle = body['SimilarIncidentsByTitle']
+        self.SimilarIncidentsByTactic = body['SimilarIncidentsByTactic']
+        self.SimilarIncidentsByEntity = body['SimilarIncidentsByEntity']

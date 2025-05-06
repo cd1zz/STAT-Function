@@ -7,8 +7,10 @@ from shared import coordinator, data
 
 def main(req: func.HttpRequest, context: func.Context) -> func.HttpResponse:
     logging.debug('STAT Function started processing a request.')
+    logging.info(f"Route params: {req.route_params}")
     module_name = req.route_params.get('modulename')
-
+    logging.info(f"Module name received: '{module_name}'")
+    
     try:
         req_body = req.get_json()
     except ValueError:

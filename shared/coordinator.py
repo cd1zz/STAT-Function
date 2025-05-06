@@ -1,4 +1,4 @@
-from modules import base, kql, watchlist, ti, relatedalerts, scoring, ueba, playbook, exchange, aadrisks, file, createincident, mdca, mde, similarincidents
+from modules import base, kql, watchlist, ti, relatedalerts, scoring, ueba, playbook, exchange, aadrisks, file, createincident, mdca, mde, similarincidents, entityanalysis
 from classes import STATError
 import logging
 
@@ -38,6 +38,8 @@ def initiate_module(module_name, req_body):
             return_data = createincident.execute_create_incident(req_body)
         case 'similarincidents':
             return_data = similarincidents.execute_similarincidents_module(req_body)
+        case 'entityanalysis':
+            return_data = entityanalysis.execute_entityanalysis_module(req_body)
         case _:
             raise STATError(error=f'Invalid module name: {module_name}', status_code=400)
         

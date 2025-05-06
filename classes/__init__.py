@@ -617,3 +617,26 @@ class SimilarIncidentsModule:
         self.SimilarIncidentsByTitle = body['SimilarIncidentsByTitle']
         self.SimilarIncidentsByTactic = body['SimilarIncidentsByTactic']
         self.SimilarIncidentsByEntity = body['SimilarIncidentsByEntity']
+
+class EntityAnalysisModule:
+    """Module for analyzing entities across similar incidents"""
+    
+    def __init__(self):
+        # Entity tracking
+        self.EntityTypes = ['Account', 'Host', 'IP', 'Domain', 'URL', 'FileHash', 'File']
+        self.EntitiesByType = {}
+        self.EntityRelationships = []
+        self.CommonEntityCombinations = []
+        
+        # Statistics
+        self.AnalyzedEntitiesCount = 0
+        self.AnalyzedIncidentsCount = 0
+        self.UniquePatternsCount = 0
+        self.HighFrequencyEntitiesCount = 0
+        self.EntityTypesFound = []
+        self.EntityFrequencyCounts = {}
+        
+    def load_from_input(self, module_body):
+        """Load data from a serialized module body"""
+        if module_body:
+            self.__dict__.update(module_body)

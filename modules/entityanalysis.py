@@ -4,6 +4,7 @@ import json
 import logging
 import traceback
 import time
+import random
 
 def execute_entityanalysis_module(req_body):
     """
@@ -27,8 +28,8 @@ def execute_entityanalysis_module(req_body):
     min_entity_frequency = req_body.get('MinEntityFrequency', 2)
     max_retries = req_body.get('MaxRetries', 3)
     retry_delay = req_body.get('RetryDelay', 5)
-    use_kql_fallback = req_body.get('UseKQLFallback', True)
-    api_version = req_body.get('APIVersion', '2025-03-01')
+    # Use stable API version instead of preview version
+    api_version = req_body.get('APIVersion', '2024-09-01')
     
     # Load data from the similar incidents module
     similar_incidents_data = req_body.get('SimilarIncidentsData', {})
@@ -47,8 +48,7 @@ def execute_entityanalysis_module(req_body):
         entity_analysis, 
         detailed_results, 
         max_retries, 
-        retry_delay, 
-        use_kql_fallback,
+        retry_delay,
         api_version
     )
     
@@ -80,13 +80,12 @@ def extract_entities_from_incidents(
     entity_analysis, 
     incidents, 
     max_retries=3, 
-    retry_delay=5, 
-    use_kql_fallback=True,
-    api_version='2025-03-01'
+    retry_delay=5,
+    api_version='2024-09-01'
 ):
     """
     Extract entities from each incident and organize them by type.
-    Implements multiple approaches with fallbacks when primary methods fail.
+    Implements direct API approach with proper error handling.
     """
     # Initialize entity tracking structures
     for entity_type in entity_analysis.EntityTypes:
@@ -116,19 +115,8 @@ def extract_entities_from_incidents(
             logging.warning(f"Could not find incident ID in incident data")
             continue
         
-        # Try multiple approaches to extract entities
-        entities = []
-        
-        # Approach 1: Use direct REST API entity extraction
+        # Try to extract entities using direct API
         entities = get_entities_via_api(base_object, incident_id, max_retries, retry_delay, api_version)
-        
-        # Approach 2: If REST API fails and no entities found, try expansion ID approach
-        if not entities and use_kql_fallback:
-            entities = get_entities_via_expansion(base_object, incident_id, max_retries, retry_delay)
-        
-        # Approach 3: If both direct methods fail, try KQL query fallback
-        if not entities and use_kql_fallback:
-            entities = get_entities_via_kql(base_object, incident)
         
         # Add extracted entities to our analysis
         if entities:
@@ -136,7 +124,7 @@ def extract_entities_from_incidents(
             process_incident_entities(entity_analysis, entities, incident_id)
             all_entities_count += len(entities)
         else:
-            logging.warning(f"No entities found for incident {incident_id} after all extraction attempts")
+            logging.warning(f"No entities found for incident {incident_id}")
     
     entity_analysis.AnalyzedEntitiesCount = all_entities_count
     logging.info(f"Total entities analyzed: {all_entities_count}")
@@ -146,41 +134,54 @@ def extract_entities_from_incidents(
         if entity_analysis.EntitiesByType.get(entity_type) and len(entity_analysis.EntitiesByType[entity_type]) > 0:
             entity_analysis.EntityTypesFound.append(entity_type)
 
-def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5, api_version='2025-03-01'):
+def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5, api_version='2024-09-01'):
     """
     Get entities for a specific incident using the direct REST API approach.
+    Uses stable API version and proper path construction.
     
     Args:
         base_object: The BaseModule object containing connection information
         incident_id: The ID of the incident to retrieve entities for
         max_retries: Maximum number of retry attempts
         retry_delay: Delay between retries in seconds
-        api_version: API version to use
+        api_version: API version to use (using stable version)
         
     Returns:
         List of entity objects or empty list if failed
     """
-    logging.info(f"Attempting to get entities for incident {incident_id} via direct API")
+    logging.info(f"Attempting to get entities for incident {incident_id} via API")
     
-    # Properly format the incident ID to ensure it's a valid path
     try:
-        # If it's already a full ARM ID, use it as is
+        # Construct the proper resource path
+        # The correct format requires both provider segments for Microsoft Sentinel
         if incident_id.startswith('/subscriptions/'):
+            # It's already a full ARM ID
             path = f"{incident_id}/entities?api-version={api_version}"
-        # If it's a GUID only, try to construct the path using the base incident ARM ID
         elif base_object.IncidentARMId:
-            # Extract the base path from the current incident
-            base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
-            path = f"{base_path}/{incident_id}/entities?api-version={api_version}"
+            # Extract required parts from the current incident ARM ID
+            parts = base_object.IncidentARMId.split('/')
+            if len(parts) >= 9:
+                # Standard format: /subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.OperationalInsights/workspaces/{workspace}/providers/Microsoft.SecurityInsights/...
+                subscription_id = parts[2]
+                resource_group = parts[4]
+                workspace = parts[8]
+                
+                # Construct the full path with all required provider segments
+                path = f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.OperationalInsights/workspaces/{workspace}/providers/Microsoft.SecurityInsights/incidents/{incident_id}/entities?api-version={api_version}"
+            else:
+                # Fallback to base path if structure doesn't match expected format
+                base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1]) 
+                path = f"{base_path}/{incident_id}/entities?api-version={api_version}"
         else:
-            logging.error(f"Cannot construct entity path: incident_id={incident_id}, IncidentARMId={base_object.IncidentARMId}")
+            logging.error(f"Cannot construct entity path: incident_id={incident_id}, IncidentARMId not available")
             return []
         
         logging.info(f"Using API path: {path}")
         
-        # Implement retry logic
+        # Implement retry with exponential backoff
         for attempt in range(max_retries):
             try:
+                # IMPORTANT: Use POST method (not GET) as required by the API
                 response = rest.rest_call_post(base_object, 'arm', path, {})
                 
                 # Check if the request was successful
@@ -194,295 +195,45 @@ def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5,
                         logging.info(f"Successfully retrieved {len(entities)} entities via API")
                         return entities
                     else:
-                        logging.warning(f"Response contained no 'value' key: {json.dumps(content, indent=2)}")
+                        logging.warning(f"Response contained no 'value' key: {str(content)[:200]}")
                 else:
                     logging.warning(f"API returned non-200 status: {response.status_code}")
+                    # Check if it's a rate limiting issue
+                    if response.status_code == 429 and 'Retry-After' in response.headers:
+                        retry_after = int(response.headers.get('Retry-After', retry_delay))
+                        logging.info(f"Rate limited. Waiting for {retry_after} seconds before retry")
+                        time.sleep(retry_after)
+                        continue
                 
-                # Wait before retrying
+                # Calculate backoff time with jitter for non-429 errors
+                backoff_time = min(retry_delay * (2 ** attempt), 60)  # Cap at 60 seconds
+                # Apply jitter to avoid thundering herd problem (±20%)
+                jitter = backoff_time * 0.2 * (2 * (0.5 - random.random()))
+                wait_time = max(1, backoff_time + jitter)
+                
+                # Only retry if not the last attempt
                 if attempt < max_retries - 1:
-                    logging.info(f"Retrying API call after {retry_delay} seconds (attempt {attempt+1}/{max_retries})")
-                    time.sleep(retry_delay)
+                    logging.info(f"Retrying API call after {wait_time:.1f} seconds (attempt {attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    logging.error(f"All retry attempts failed for incident {incident_id}")
             
             except Exception as e:
                 logging.error(f"Exception in API-based entity extraction: {str(e)}")
                 if attempt < max_retries - 1:
-                    logging.info(f"Retrying after {retry_delay} seconds (attempt {attempt+1}/{max_retries})")
-                    time.sleep(retry_delay)
+                    # Use exponential backoff for exceptions too
+                    backoff_time = retry_delay * (2 ** attempt)
+                    logging.info(f"Retrying after {backoff_time} seconds (attempt {attempt+1}/{max_retries})")
+                    time.sleep(backoff_time)
                 else:
                     logging.error(f"All retry attempts failed for API-based extraction")
                     logging.error(traceback.format_exc())
     
     except Exception as e:
-        logging.error(f"Failed to extract entities via API: {str(e)}\nAPI endpoint: {path}")
+        logging.error(f"Failed to extract entities via API: {str(e)}")
         logging.error(traceback.format_exc())
     
     return []
-
-def get_entities_via_expansion(base_object, incident_id, max_retries=3, retry_delay=5):
-    """
-    Get entities using the undocumented expansion ID approach.
-    This is a fallback when the standard API fails.
-    
-    Args:
-        base_object: The BaseModule object
-        incident_id: The incident ID
-        max_retries: Maximum retry attempts
-        retry_delay: Delay between retries
-    
-    Returns:
-        List of entities or empty list if failed
-    """
-    logging.info(f"Attempting to get entities for incident {incident_id} via expansion ID approach")
-    
-    try:
-        # First get the security alert ID from incident relations
-        if base_object.IncidentARMId:
-            base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
-            relations_path = f"{base_path}/{incident_id}/relations?api-version=2025-03-01"
-            
-            logging.info(f"Getting incident relations: {relations_path}")
-            
-            for attempt in range(max_retries):
-                try:
-                    relations_response = rest.rest_call_get(base_object, 'arm', relations_path)
-                    
-                    if relations_response.status_code == 200:
-                        relations_content = json.loads(relations_response.content)
-                        
-                        # Find the security alert relation
-                        security_alert_id = None
-                        if 'value' in relations_content:
-                            for relation in relations_content['value']:
-                                if relation.get('properties', {}).get('relatedResourceType') == 'Microsoft.SecurityInsights/Alerts':
-                                    security_alert_id = relation.get('properties', {}).get('relatedResourceName')
-                                    break
-                        
-                        if security_alert_id:
-                            logging.info(f"Found SecurityAlertId: {security_alert_id}")
-                            
-                            # Now use the expansion ID approach
-                            expansion_id = "98b974fd-cc64-48b8-9bd0-3a209f5b944b"  # Special hardcoded GUID
-                            expand_path = f"{base_path}/providers/Microsoft.SecurityInsights/entities/{security_alert_id}/expand?api-version=2025-03-01"
-                            expand_body = {'expansionId': expansion_id}
-                            
-                            logging.info(f"Using expand path: {expand_path}")
-                            
-                            expand_response = rest.rest_call_post(base_object, 'arm', expand_path, expand_body)
-                            
-                            if expand_response.status_code == 200:
-                                expand_content = json.loads(expand_response.content)
-                                if 'value' in expand_content:
-                                    entities = expand_content['value']
-                                    logging.info(f"Successfully retrieved {len(entities)} entities via expansion")
-                                    return entities
-                            else:
-                                logging.warning(f"Expansion request failed with status {expand_response.status_code}")
-                        else:
-                            logging.warning("No SecurityAlert relation found in incident relations")
-                    
-                    # Retry logic
-                    if attempt < max_retries - 1:
-                        logging.info(f"Retrying expansion approach after {retry_delay} seconds (attempt {attempt+1}/{max_retries})")
-                        time.sleep(retry_delay)
-                
-                except Exception as e:
-                    logging.error(f"Exception in expansion-based extraction: {str(e)}")
-                    if attempt < max_retries - 1:
-                        logging.info(f"Retrying after {retry_delay} seconds")
-                        time.sleep(retry_delay)
-                    else:
-                        logging.error(f"All retry attempts failed for expansion-based extraction")
-    
-    except Exception as e:
-        logging.error(f"Failed to extract entities via expansion approach: {str(e)}")
-        logging.error(traceback.format_exc())
-    
-    return []
-
-def get_entities_via_kql(base_object, incident):
-    """
-    Fallback approach to extract entities using KQL queries.
-    This approach queries the SecurityAlert table directly.
-    """
-    logging.info("Attempting to extract entities via KQL query fallback")
-    
-    entities = []
-    
-    try:
-        # Get incident number or title for correlation
-        incident_number = incident.get('IncidentNumber')
-        incident_title = incident.get('Title')
-        
-        # If we have an incident number or title, we can try to find related alerts
-        if incident_number or incident_title:
-            # Construct KQL query to find related alerts with entities
-            if incident_number:
-                # Using correct schema columns as per provided information
-                query = f"""
-                SecurityIncident
-                | where IncidentNumber == {incident_number}
-                | project IncidentName, AlertIds
-                | mv-expand AlertIds
-                | join kind=inner (
-                    SecurityAlert
-                    | where TimeGenerated > ago(14d)
-                    | extend AlertId = SystemAlertId
-                ) on $left.AlertIds == $right.AlertId
-                | project TimeGenerated, AlertName, AlertSeverity, Entities
-                | where isnotempty(Entities)
-                | extend EntitiesObj = parse_json(Entities)
-                | mv-expand EntitiesObj
-                | extend EntityType = tostring(EntitiesObj.Type)
-                | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
-                | limit 50
-                """
-            else:
-                # Use title as a fallback (less precise)
-                sanitized_title = incident_title.replace("'", "''")
-                query = f"""
-                SecurityAlert
-                | where TimeGenerated > ago(14d)
-                | where AlertName has '{sanitized_title}'
-                | project TimeGenerated, AlertName, AlertSeverity, Entities
-                | where isnotempty(Entities)
-                | extend EntitiesObj = parse_json(Entities)
-                | mv-expand EntitiesObj
-                | extend EntityType = tostring(EntitiesObj.Type)
-                | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
-                | limit 50
-                """
-            
-            # Execute the KQL query with reduced time range
-            try:
-                results = rest.execute_la_query(base_object, query, 14)
-                logging.info(f"KQL query returned {len(results)} records")
-                
-                if results:
-                    # Process each entity into our standard format
-                    for result in results:
-                        if 'EntityDetails' in result:
-                            entity_data = result['EntityDetails']
-                            entity_type = result.get('EntityType', '').lower()
-                            
-                            # Convert from KQL result format to the standard API format
-                            entity_obj = {
-                                'kind': entity_type,
-                                'properties': {}
-                            }
-                            
-                            # Map common entity properties based on type
-                            if entity_type == 'account':
-                                entity_obj['properties'] = {
-                                    'accountName': entity_data.get('Name'),
-                                    'userPrincipalName': entity_data.get('UPNSuffix', ''),
-                                    'friendlyName': entity_data.get('DisplayName', entity_data.get('Name', '')),
-                                    'sid': entity_data.get('Sid', '')
-                                }
-                            elif entity_type == 'host':
-                                entity_obj['properties'] = {
-                                    'hostName': entity_data.get('HostName', entity_data.get('NetBiosName', '')),
-                                    'netBiosName': entity_data.get('NetBiosName', ''),
-                                    'fqdn': entity_data.get('FQDN', '')
-                                }
-                            elif entity_type == 'ip':
-                                entity_obj['properties'] = {
-                                    'address': entity_data.get('Address')
-                                }
-                            elif entity_type in ['dns', 'dnsresolution']:
-                                entity_obj['properties'] = {
-                                    'domainName': entity_data.get('DomainName')
-                                }
-                            elif entity_type == 'url':
-                                entity_obj['properties'] = {
-                                    'url': entity_data.get('Url')
-                                }
-                            elif entity_type == 'filehash':
-                                entity_obj['properties'] = {
-                                    'hashValue': entity_data.get('Value'),
-                                    'algorithm': entity_data.get('Algorithm', '')
-                                }
-                            elif entity_type == 'file':
-                                entity_obj['properties'] = {
-                                    'fileName': entity_data.get('Name'),
-                                    'friendlyName': entity_data.get('Name')
-                                }
-                            
-                            entities.append(entity_obj)
-                
-                else:
-                    logging.warning("KQL query returned no results")
-                    
-                    # Try a broader fallback query if the first attempts fail
-                    fallback_query = """
-                    SecurityAlert
-                    | where TimeGenerated > ago(7d)
-                    | where isnotempty(Entities)
-                    | extend EntitiesObj = parse_json(Entities)
-                    | mv-expand EntitiesObj
-                    | extend EntityType = tostring(EntitiesObj.Type)
-                    | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
-                    | limit 30
-                    """
-                    
-                    fallback_results = rest.execute_la_query(base_object, fallback_query, 7)
-                    
-                    if fallback_results:
-                        logging.info(f"Fallback query returned {len(fallback_results)} records")
-                        
-                        # Process entities from fallback query (same logic as above)
-                        for result in fallback_results:
-                            if 'EntityDetails' in result:
-                                entity_data = result['EntityDetails']
-                                entity_type = result.get('EntityType', '').lower()
-                                
-                                entity_obj = {
-                                    'kind': entity_type,
-                                    'properties': entity_data
-                                }
-                                entities.append(entity_obj)
-            
-            except Exception as e:
-                logging.error(f"Error executing KQL query: {str(e)}")
-                
-                # Add a simpler fallback query with basic structure
-                try:
-                    simple_query = """
-                    SecurityAlert
-                    | where TimeGenerated > ago(7d)
-                    | where isnotempty(Entities)
-                    | extend EntitiesObj = parse_json(Entities)
-                    | mv-expand EntitiesObj
-                    | project EntityDetails = EntitiesObj
-                    | limit 20
-                    """
-                    
-                    simple_results = rest.execute_la_query(base_object, simple_query, 7)
-                    
-                    if simple_results:
-                        logging.info(f"Simple fallback query returned {len(simple_results)} records")
-                        for result in simple_results:
-                            if 'EntityDetails' in result:
-                                entity_data = result['EntityDetails']
-                                entity_type = entity_data.get('Type', '').lower()
-                                
-                                entity_obj = {
-                                    'kind': entity_type,
-                                    'properties': entity_data
-                                }
-                                entities.append(entity_obj)
-                
-                except Exception as simple_error:
-                    logging.error(f"Fallback KQL query failed: {str(simple_error)}\nQuery: {query}")
-        
-        else:
-            logging.warning("Cannot perform KQL query: missing incident number and title")
-    
-    except Exception as e:
-        logging.error(f"Failed to extract entities via KQL: {str(e)}\nQuery: {query}")
-        logging.error(traceback.format_exc())
-    
-    logging.info(f"KQL approach extracted {len(entities)} entities")
-    return entities
 
 def process_incident_entities(entity_analysis, incident_entities, incident_id):
     """

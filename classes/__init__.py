@@ -623,7 +623,7 @@ class EntityAnalysisModule:
     
     def __init__(self):
         # Entity tracking
-        self.EntityTypes = ['Account', 'Host', 'IP', 'Domain', 'URL', 'FileHash', 'File']
+        self.EntityTypes = ['Account', 'Host', 'IP', 'Domain', 'URL', 'FileHash', 'File', 'Email']
         self.EntitiesByType = {}
         self.EntityRelationships = []
         self.CommonEntityCombinations = []

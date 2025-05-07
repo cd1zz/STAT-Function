@@ -27,8 +27,8 @@ def execute_entityanalysis_module(req_body):
     min_entity_frequency = req_body.get('MinEntityFrequency', 2)
     max_retries = req_body.get('MaxRetries', 3)
     retry_delay = req_body.get('RetryDelay', 5)
-    # Use stable API version instead of preview version
-    api_version = req_body.get('APIVersion', '2024-09-01')
+    use_kql_fallback = req_body.get('UseKQLFallback', True)
+    api_version = req_body.get('APIVersion', '2025-03-01')
     
     # Load data from the similar incidents module
     similar_incidents_data = req_body.get('SimilarIncidentsData', {})
@@ -47,9 +47,14 @@ def execute_entityanalysis_module(req_body):
         entity_analysis, 
         detailed_results, 
         max_retries, 
-        retry_delay,
+        retry_delay, 
+        use_kql_fallback,
         api_version
     )
+    
+    # Extract email entities from the raw data
+    # Add this new call
+    extract_email_entities_from_raw_data(base_object, entity_analysis)
     
     # Find relationships between entities
     analyze_entity_relationships(entity_analysis)
@@ -262,6 +267,13 @@ def process_incident_entities(entity_analysis, incident_entities, incident_id):
             process_filehash_entity(entity_analysis, properties, incident_id)
         elif entity_type == 'file':
             process_file_entity(entity_analysis, properties, incident_id)
+        # Add a check for email entities
+        elif entity_type == 'email':
+            process_email_entity(entity_analysis, properties, incident_id)
+        # Process entities from RawEntity that might be emails
+        elif 'friendlyName' in properties and any(email_prop in properties for email_prop in 
+              ['recipient', 'p1Sender', 'p2Sender', 'networkMessageId', 'subject']):
+            process_email_entity(entity_analysis, properties, incident_id)
 
 def process_account_entity(entity_analysis, properties, incident_id):
     """Process account entity"""
@@ -278,6 +290,85 @@ def process_account_entity(entity_analysis, properties, incident_id):
         add_entity_to_analysis(entity_analysis, 'Account', sid, incident_id, 'SID')
     if aad_id:
         add_entity_to_analysis(entity_analysis, 'Account', aad_id, incident_id, 'AAD ID')
+
+def process_email_entity(entity_analysis, properties, incident_id):
+    """Process email entity with all pertinent data points"""
+    # Extract all relevant email properties
+    recipient = properties.get('recipient', '')
+    p1_sender = properties.get('p1Sender', '')
+    p1_sender_domain = properties.get('p1SenderDomain', '')
+    sender_ip = properties.get('senderIP', '')
+    p2_sender = properties.get('p2Sender', '')
+    p2_sender_display_name = properties.get('p2SenderDisplayName', '')
+    p2_sender_domain = properties.get('p2SenderDomain', '')
+    receive_date = properties.get('receiveDate', '')
+    network_message_id = properties.get('networkMessageId', '')
+    internet_message_id = properties.get('internetMessageId', '')
+    subject = properties.get('subject', '')
+    delivery_action = properties.get('deliveryAction', '')
+    language = properties.get('language', '')
+    
+    # Add each relevant email property to analysis
+    if recipient:
+        add_entity_to_analysis(entity_analysis, 'Email', recipient, incident_id, 'Recipient')
+    if p1_sender:
+        add_entity_to_analysis(entity_analysis, 'Email', p1_sender, incident_id, 'Sender')
+    if p1_sender_domain:
+        add_entity_to_analysis(entity_analysis, 'Email', p1_sender_domain, incident_id, 'SenderDomain')
+    if sender_ip:
+        add_entity_to_analysis(entity_analysis, 'Email', sender_ip, incident_id, 'SenderIP')
+    if subject:
+        add_entity_to_analysis(entity_analysis, 'Email', subject, incident_id, 'Subject')
+    if network_message_id:
+        add_entity_to_analysis(entity_analysis, 'Email', network_message_id, incident_id, 'NetworkMessageID')
+    if internet_message_id:
+        add_entity_to_analysis(entity_analysis, 'Email', internet_message_id, incident_id, 'InternetMessageID')
+    
+    # Store the complete email object for more detailed analysis
+    email_object = {
+        'recipient': recipient,
+        'p1Sender': p1_sender,
+        'p1SenderDomain': p1_sender_domain,
+        'senderIP': sender_ip,
+        'p2Sender': p2_sender,
+        'p2SenderDisplayName': p2_sender_display_name,
+        'p2SenderDomain': p2_sender_domain,
+        'receiveDate': receive_date,
+        'networkMessageId': network_message_id,
+        'internetMessageId': internet_message_id,
+        'subject': subject,
+        'deliveryAction': delivery_action,
+        'language': language
+    }
+    
+    # Add the complete email object to a separate collection for full context
+    if 'EmailObjects' not in entity_analysis.__dict__:
+        entity_analysis.EmailObjects = []
+    
+    entity_analysis.EmailObjects.append({
+        'properties': email_object,
+        'incident_id': incident_id
+    })
+
+def extract_email_entities_from_raw_data(base_object, entity_analysis):
+    """
+    Extract email entities from the OtherEntities section of the raw data
+    """
+    logging.info("Extracting email entities from OtherEntities")
+    
+    # Check if OtherEntities exists in the base object
+    if hasattr(base_object, 'OtherEntities') and base_object.OtherEntities:
+        for entity in base_object.OtherEntities:
+            raw_entity = entity.get('RawEntity', {})
+            
+            # Check if this looks like an email entity
+            if any(email_prop in raw_entity for email_prop in 
+                  ['recipient', 'p1Sender', 'p2Sender', 'networkMessageId', 'subject']):
+                
+                # Process as an email entity
+                process_email_entity(entity_analysis, raw_entity, 'current_incident')
+                
+                logging.info(f"Found and processed email entity: {raw_entity.get('networkMessageId', 'unknown')}")
 
 def process_host_entity(entity_analysis, properties, incident_id):
     """Process host entity"""
@@ -492,6 +583,65 @@ def find_common_entity_combinations(entity_analysis, min_frequency):
     entity_analysis.CommonEntityCombinations = common_combinations
     entity_analysis.UniquePatternsCount = len(common_combinations)
 
+def add_email_analysis_to_comment(entity_analysis, comment):
+    """
+    Add email-specific analysis to the incident comment
+    """
+    # Check if we have any email entities
+    email_entities = entity_analysis.EntitiesByType.get('Email', [])
+    if not email_entities:
+        return comment
+    
+    # Add email analysis section
+    comment += "<h4>Email Analysis</h4>"
+    
+    # Analyze email senders
+    senders = [e for e in email_entities if e['subtype'] == 'Sender']
+    if senders:
+        senders.sort(key=lambda x: x['frequency'], reverse=True)
+        sender_data = []
+        for sender in senders[:10]:
+            sender_data.append({
+                'Sender': sender['value'],
+                'Frequency': sender['frequency'],
+                'Incidents': ', '.join(map(str, sender['incidents']))
+            })
+        
+        comment += "<h5>Common Email Senders</h5>"
+        comment += data.list_to_html_table(sender_data, max_rows=10, index=False)
+    
+    # Analyze email domains
+    domains = [e for e in email_entities if e['subtype'] == 'SenderDomain']
+    if domains:
+        domains.sort(key=lambda x: x['frequency'], reverse=True)
+        domain_data = []
+        for domain in domains[:10]:
+            domain_data.append({
+                'Domain': domain['value'],
+                'Frequency': domain['frequency'],
+                'Incidents': ', '.join(map(str, domain['incidents']))
+            })
+        
+        comment += "<h5>Common Sender Domains</h5>"
+        comment += data.list_to_html_table(domain_data, max_rows=10, index=False)
+    
+    # Analyze email subjects
+    subjects = [e for e in email_entities if e['subtype'] == 'Subject']
+    if subjects:
+        subjects.sort(key=lambda x: x['frequency'], reverse=True)
+        subject_data = []
+        for subject in subjects[:10]:
+            subject_data.append({
+                'Subject': subject['value'],
+                'Frequency': subject['frequency'],
+                'Incidents': ', '.join(map(str, subject['incidents']))
+            })
+        
+        comment += "<h5>Common Email Subjects</h5>"
+        comment += data.list_to_html_table(subject_data, max_rows=10, index=False)
+    
+    return comment
+
 def add_incident_comment(base_object, entity_analysis):
     """
     Add a comment to the incident with the entity analysis results
@@ -543,6 +693,9 @@ def add_incident_comment(base_object, entity_analysis):
             
             comment += f"<h4>Common {entity_type} Entities</h4>"
             comment += html_table
+    
+    # Add email-specific analysis
+    comment = add_email_analysis_to_comment(entity_analysis, comment)
     
     # Add common entity combinations
     if entity_analysis.CommonEntityCombinations:

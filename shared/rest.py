@@ -293,7 +293,8 @@ def get_incident_entities(base_object, incident_id):
     logging.info(f"Using API path: {path}")
     
     try:
-        response = rest.rest_call_get(base_object, 'arm', path)
+        # Use rest_call_get directly without the module reference
+        response = rest_call_get(base_object, 'arm', path)
         
         # Check if the request was successful
         if response.status_code != 200:

@@ -4,6 +4,8 @@ import json
 import logging
 import traceback
 import time
+import random
+from datetime import datetime
 
 def execute_entityanalysis_module(req_body):
     """
@@ -15,6 +17,7 @@ def execute_entityanalysis_module(req_body):
     - AddIncidentTask: Whether to add a task to incident
     - IncidentTaskInstructions: Instructions for the added task
     - MinEntityFrequency: Minimum frequency for an entity to be considered high frequency
+    - PrepareLLMData: Whether to prepare data for LLM analysis
     """
     # Initialize base module
     base_object = BaseModule()
@@ -51,7 +54,6 @@ def execute_entityanalysis_module(req_body):
     )
     
     # Extract email entities from the raw data
-    # Add this new call
     extract_email_entities_from_raw_data(base_object, entity_analysis)
     
     # Find relationships between entities
@@ -74,6 +76,40 @@ def execute_entityanalysis_module(req_body):
             'Review Entity Patterns Across Similar Incidents', 
             req_body.get('IncidentTaskInstructions', 'Review entity patterns across similar incidents to identify common threats')
         )
+    
+    # Add the condensed summary for LLM processing if requested
+    if req_body.get('PrepareLLMData', False):
+        # Extract classification patterns
+        classification_patterns = extract_classification_patterns(entity_analysis, detailed_results)
+        
+        # Deduplicate while preserving important patterns
+        deduplicated_data = deduplicate_entities(
+            entity_analysis, 
+            classification_patterns,
+            min_entity_frequency
+        )
+        
+        # Generate the final summary
+        llm_summary = generate_llm_friendly_summary(
+            entity_analysis,
+            deduplicated_data
+        )
+        
+        # Add the current incident entities for comparison
+        llm_summary['current_incident']['entities'] = extract_current_incident_entities(base_object)
+        
+        # Store the condensed data in the module response
+        entity_analysis.LLMData = llm_summary
+        
+        # Optionally add a comment to the incident with the LLM-ready data
+        if req_body.get('AddIncidentComments', True) and base_object.IncidentAvailable:
+            llm_comment = f"<h3>Entity Analysis for LLM Classification</h3>"
+            llm_comment += f"<p>Generated a condensed entity analysis for LLM processing.</p>"
+            llm_comment += f"<p>Found {len(classification_patterns['true_positive_patterns'])} true positive entity types "
+            llm_comment += f"and {len(classification_patterns['false_positive_patterns'])} false positive entity types "
+            llm_comment += f"across {entity_analysis.AnalyzedIncidentsCount} similar incidents.</p>"
+            
+            rest.add_incident_comment(base_object, llm_comment)
     
     return Response(entity_analysis)
 
@@ -580,6 +616,349 @@ def find_common_entity_combinations(entity_analysis, min_frequency):
     
     entity_analysis.CommonEntityCombinations = common_combinations
     entity_analysis.UniquePatternsCount = len(common_combinations)
+
+def extract_classification_patterns(entity_analysis, detailed_results):
+    """
+    Extract patterns that correlate with true/false positive classifications from historical incidents
+    """
+    # Group incidents by classification
+    true_positive_incidents = []
+    false_positive_incidents = []
+    
+    # Get classifications from historical data
+    for incident in detailed_results:
+        if incident.get('Classification') == 'TruePositive':
+            true_positive_incidents.append(incident)
+        elif incident.get('Classification') in ['FalsePositive', 'Informational', 'BenignPositive']:
+            false_positive_incidents.append(incident)
+    
+    # Extract entities associated with each classification
+    tp_entities = {entity_type: [] for entity_type in entity_analysis.EntityTypes}
+    fp_entities = {entity_type: [] for entity_type in entity_analysis.EntityTypes}
+    
+    # Populate entity lists by classification
+    for entity_type in entity_analysis.EntityTypesFound:
+        for entity in entity_analysis.EntitiesByType.get(entity_type, []):
+            # Check if this entity appears more in TP or FP incidents
+            tp_count = sum(1 for incident_id in entity['incidents'] 
+                           if any(incident.get('IncidentId', '') == incident_id or 
+                                  incident.get('id', '') == incident_id or
+                                  incident.get('IncidentName', '') == incident_id 
+                                  for incident in true_positive_incidents))
+            
+            fp_count = sum(1 for incident_id in entity['incidents'] 
+                           if any(incident.get('IncidentId', '') == incident_id or 
+                                  incident.get('id', '') == incident_id or
+                                  incident.get('IncidentName', '') == incident_id 
+                                  for incident in false_positive_incidents))
+            
+            # Calculate classification ratio
+            total = tp_count + fp_count
+            if total > 0:
+                tp_ratio = tp_count / total
+                fp_ratio = fp_count / total
+                
+                # Add classification data to entity
+                entity_with_class = entity.copy()
+                entity_with_class['classification_data'] = {
+                    'tp_count': tp_count,
+                    'fp_count': fp_count,
+                    'tp_ratio': tp_ratio,
+                    'fp_ratio': fp_ratio,
+                    'classification_confidence': max(tp_ratio, fp_ratio)
+                }
+                
+                # Add to appropriate list
+                if tp_ratio > fp_ratio:
+                    tp_entities[entity_type].append(entity_with_class)
+                else:
+                    fp_entities[entity_type].append(entity_with_class)
+    
+    return {
+        'true_positive_patterns': tp_entities,
+        'false_positive_patterns': fp_entities
+    }
+
+def deduplicate_entities(entity_analysis, classification_patterns, min_frequency=2):
+    """
+    Deduplicate entities while preserving classification patterns
+    """
+    deduplicated_data = {
+        'high_value_entities': {},
+        'entity_relationships': []
+    }
+    
+    # Extract high-value entities by type (those with strong classification signals)
+    for entity_type in entity_analysis.EntityTypesFound:
+        # Start with high-frequency entities
+        high_freq_entities = [e for e in entity_analysis.EntitiesByType.get(entity_type, []) 
+                             if e['frequency'] >= min_frequency]
+        
+        # For each entity type, keep entities with strong classification signals
+        tp_entities = classification_patterns['true_positive_patterns'].get(entity_type, [])
+        fp_entities = classification_patterns['false_positive_patterns'].get(entity_type, [])
+        
+        # Sort by classification confidence
+        tp_entities.sort(key=lambda x: x.get('classification_data', {}).get('classification_confidence', 0), reverse=True)
+        fp_entities.sort(key=lambda x: x.get('classification_data', {}).get('classification_confidence', 0), reverse=True)
+        
+        # Keep top N of each, where N scales with entity type importance
+        max_entities = {
+            'Account': 10,
+            'IP': 10,
+            'Email': 10,
+            'Domain': 8,
+            'URL': 8,
+            'FileHash': 6,
+            'File': 6,
+            'Host': 10
+        }.get(entity_type, 5)
+        
+        # Combine TP and FP while respecting limits
+        tp_limit = max(1, max_entities // 2)
+        fp_limit = max(1, max_entities // 2)
+        
+        deduplicated_data['high_value_entities'][entity_type] = {
+            'true_positive': tp_entities[:tp_limit],
+            'false_positive': fp_entities[:fp_limit]
+        }
+    
+    # Extract high-value entity relationships (those with strong classification patterns)
+    if hasattr(entity_analysis, 'EntityRelationships'):
+        # Group relationships by classification
+        tp_relationships = []
+        fp_relationships = []
+        
+        for relationship in entity_analysis.EntityRelationships:
+            if relationship['co_occurrence'] >= min_frequency:
+                # Check if this relationship appears more in TP or FP incidents
+                tp_count = 0
+                fp_count = 0
+                
+                for incident_id in relationship['incidents']:
+                    # Check in TP incidents
+                    if any(incident.get('IncidentId', '') == incident_id or 
+                           incident.get('id', '') == incident_id or
+                           incident.get('IncidentName', '') == incident_id 
+                           for incident in classification_patterns.get('true_positive_incidents', [])):
+                        tp_count += 1
+                    
+                    # Check in FP incidents
+                    elif any(incident.get('IncidentId', '') == incident_id or 
+                             incident.get('id', '') == incident_id or
+                             incident.get('IncidentName', '') == incident_id 
+                             for incident in classification_patterns.get('false_positive_incidents', [])):
+                        fp_count += 1
+                
+                # Calculate classification ratio
+                total = tp_count + fp_count
+                if total > 0:
+                    tp_ratio = tp_count / total
+                    fp_ratio = fp_count / total
+                    
+                    # Add classification data to relationship
+                    relationship_with_class = relationship.copy()
+                    relationship_with_class['classification_data'] = {
+                        'tp_count': tp_count,
+                        'fp_count': fp_count,
+                        'tp_ratio': tp_ratio,
+                        'fp_ratio': fp_ratio,
+                        'classification_confidence': max(tp_ratio, fp_ratio)
+                    }
+                    
+                    # Add to appropriate list
+                    if tp_ratio > fp_ratio:
+                        tp_relationships.append(relationship_with_class)
+                    else:
+                        fp_relationships.append(relationship_with_class)
+        
+        # Sort by confidence and limit
+        tp_relationships.sort(key=lambda x: x.get('classification_data', {}).get('classification_confidence', 0), reverse=True)
+        fp_relationships.sort(key=lambda x: x.get('classification_data', {}).get('classification_confidence', 0), reverse=True)
+        
+        deduplicated_data['entity_relationships'] = {
+            'true_positive': tp_relationships[:10],  # Top 10 TP relationships
+            'false_positive': fp_relationships[:10]  # Top 10 FP relationships
+        }
+    
+    return deduplicated_data
+
+def generate_llm_friendly_summary(entity_analysis, deduplicated_data):
+    """
+    Generate a concise, LLM-friendly summary
+    """
+    summary = {
+        'metadata': {
+            'analyzed_incidents_count': entity_analysis.AnalyzedIncidentsCount,
+            'entity_types_found': entity_analysis.EntityTypesFound,
+            'high_frequency_entities_count': entity_analysis.HighFrequencyEntitiesCount,
+            'generated_timestamp': datetime.now().isoformat()
+        },
+        'classification_patterns': {
+            'true_positive': {
+                'entity_patterns': {},
+                'entity_relationships': []
+            },
+            'false_positive': {
+                'entity_patterns': {},
+                'entity_relationships': []
+            }
+        },
+        'current_incident': {
+            'entities': {}  # Will be populated with current incident entities
+        }
+    }
+    
+    # Add compact entity patterns by classification
+    for entity_type in entity_analysis.EntityTypesFound:
+        if entity_type in deduplicated_data['high_value_entities']:
+            # Add TP entities
+            tp_entities = deduplicated_data['high_value_entities'][entity_type]['true_positive']
+            if tp_entities:
+                summary['classification_patterns']['true_positive']['entity_patterns'][entity_type] = [
+                    {
+                        'value': e['value'],
+                        'frequency': e['frequency'],
+                        'subtype': e['subtype'],
+                        'confidence': e.get('classification_data', {}).get('classification_confidence', 0)
+                    } for e in tp_entities
+                ]
+            
+            # Add FP entities
+            fp_entities = deduplicated_data['high_value_entities'][entity_type]['false_positive']
+            if fp_entities:
+                summary['classification_patterns']['false_positive']['entity_patterns'][entity_type] = [
+                    {
+                        'value': e['value'],
+                        'frequency': e['frequency'],
+                        'subtype': e['subtype'],
+                        'confidence': e.get('classification_data', {}).get('classification_confidence', 0)
+                    } for e in fp_entities
+                ]
+    
+    # Add entity relationships
+    if 'entity_relationships' in deduplicated_data:
+        # Add TP relationships
+        tp_relationships = deduplicated_data['entity_relationships'].get('true_positive', [])
+        for rel in tp_relationships:
+            summary['classification_patterns']['true_positive']['entity_relationships'].append({
+                'entity1_type': rel['entity1_type'],
+                'entity1_value': rel['entity1_value'],
+                'entity2_type': rel['entity2_type'],
+                'entity2_value': rel['entity2_value'],
+                'co_occurrence': rel['co_occurrence'],
+                'confidence': rel.get('classification_data', {}).get('classification_confidence', 0)
+            })
+        
+        # Add FP relationships
+        fp_relationships = deduplicated_data['entity_relationships'].get('false_positive', [])
+        for rel in fp_relationships:
+            summary['classification_patterns']['false_positive']['entity_relationships'].append({
+                'entity1_type': rel['entity1_type'],
+                'entity1_value': rel['entity1_value'],
+                'entity2_type': rel['entity2_type'],
+                'entity2_value': rel['entity2_value'],
+                'co_occurrence': rel['co_occurrence'],
+                'confidence': rel.get('classification_data', {}).get('classification_confidence', 0)
+            })
+    
+    return summary
+
+def extract_current_incident_entities(base_object):
+    """Extract entities from the current incident"""
+    current_entities = {}
+    
+    # Extract Account entities
+    if hasattr(base_object, 'Accounts') and base_object.Accounts:
+        current_entities['Account'] = []
+        for account in base_object.Accounts:
+            current_entities['Account'].append({
+                'value': account.get('userPrincipalName', ''),
+                'subtype': 'UPN'
+            })
+    
+    # Extract IP entities
+    if hasattr(base_object, 'IPs') and base_object.IPs:
+        current_entities['IP'] = []
+        for ip in base_object.IPs:
+            current_entities['IP'].append({
+                'value': ip.get('Address', ''),
+                'subtype': 'Address'
+            })
+    
+    # Extract Host entities
+    if hasattr(base_object, 'Hosts') and base_object.Hosts:
+        current_entities['Host'] = []
+        for host in base_object.Hosts:
+            current_entities['Host'].append({
+                'value': host.get('HostName', ''),
+                'subtype': 'Hostname'
+            })
+    
+    # Extract Domain entities
+    if hasattr(base_object, 'Domains') and base_object.Domains:
+        current_entities['Domain'] = []
+        for domain in base_object.Domains:
+            current_entities['Domain'].append({
+                'value': domain.get('Domain', ''),
+                'subtype': 'Domain'
+            })
+    
+    # Extract Email entities from OtherEntities if present
+    if hasattr(base_object, 'OtherEntities') and base_object.OtherEntities:
+        current_entities['Email'] = []
+        for entity in base_object.OtherEntities:
+            raw_entity = entity.get('RawEntity', {})
+            if any(email_prop in raw_entity for email_prop in 
+                  ['recipient', 'p1Sender', 'p2Sender', 'networkMessageId', 'subject']):
+                
+                # Extract email properties
+                if 'p1Sender' in raw_entity and raw_entity['p1Sender']:
+                    current_entities['Email'].append({
+                        'value': raw_entity['p1Sender'],
+                        'subtype': 'Sender'
+                    })
+                
+                if 'recipient' in raw_entity and raw_entity['recipient']:
+                    current_entities['Email'].append({
+                        'value': raw_entity['recipient'],
+                        'subtype': 'Recipient'
+                    })
+                
+                if 'senderIP' in raw_entity and raw_entity['senderIP']:
+                    current_entities['Email'].append({
+                        'value': raw_entity['senderIP'],
+                        'subtype': 'SenderIP'
+                    })
+    
+    # Extract File entities
+    if hasattr(base_object, 'Files') and base_object.Files:
+        current_entities['File'] = []
+        for file in base_object.Files:
+            current_entities['File'].append({
+                'value': file.get('FileName', ''),
+                'subtype': 'FileName'
+            })
+    
+    # Extract FileHash entities
+    if hasattr(base_object, 'FileHashes') and base_object.FileHashes:
+        current_entities['FileHash'] = []
+        for file_hash in base_object.FileHashes:
+            current_entities['FileHash'].append({
+                'value': file_hash.get('FileHash', ''),
+                'subtype': file_hash.get('Algorithm', 'Unknown')
+            })
+    
+    # Extract URL entities
+    if hasattr(base_object, 'URLs') and base_object.URLs:
+        current_entities['URL'] = []
+        for url in base_object.URLs:
+            current_entities['URL'].append({
+                'value': url.get('Url', ''),
+                'subtype': 'URL'
+            })
+    
+    return current_entities
 
 def add_email_analysis_to_comment(entity_analysis, comment):
     """

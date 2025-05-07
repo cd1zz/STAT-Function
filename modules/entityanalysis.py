@@ -72,22 +72,51 @@ def extract_entities_from_incidents(base_object, entity_analysis, incidents):
     entity_analysis.EntityTypesFound = []
     all_entities_count = 0
     
+    # Add debug logging
+    logging.info(f"Starting entity extraction for {len(incidents)} incidents")
+    
     # Process each incident to extract entities
     for incident in incidents:
-        incident_id = incident.get('IncidentId')
+        # Debug: Log the incident structure
+        logging.info(f"Processing incident: {json.dumps(incident, indent=2)}")
+        
+        # Extract incident ID correctly - check different possible fields
+        incident_id = None
+        if 'IncidentId' in incident:
+            incident_id = incident['IncidentId']
+        elif 'IncidentName' in incident:
+            incident_id = incident['IncidentName']
+        elif 'id' in incident:
+            incident_id = incident['id']
+        
+        # Debug: Log the incident ID
+        logging.info(f"Extracted incident ID: {incident_id}")
         
         if not incident_id:
+            logging.warning(f"Could not find incident ID in: {json.dumps(incident, indent=2)}")
             continue
         
         # Query incident entities directly using the REST API
         try:
+            logging.info(f"Attempting to get entities for incident: {incident_id}")
             incident_entities = rest.get_incident_entities(base_object, incident_id)
+            logging.info(f"Retrieved {len(incident_entities)} entities for incident {incident_id}")
+            
+            # Debug: Log the first entity (if any)
+            if incident_entities and len(incident_entities) > 0:
+                logging.info(f"First entity example: {json.dumps(incident_entities[0], indent=2)}")
+            
             process_incident_entities(entity_analysis, incident_entities, incident_id)
             all_entities_count += len(incident_entities)
         except Exception as e:
-            logging.warning(f"Failed to extract entities from incident {incident_id}: {str(e)}")
+            logging.error(f"Failed to extract entities from incident {incident_id}: {str(e)}")
+            logging.error(f"Exception type: {type(e).__name__}")
+            # Print stack trace for better debugging
+            import traceback
+            logging.error(traceback.format_exc())
     
     entity_analysis.AnalyzedEntitiesCount = all_entities_count
+    logging.info(f"Total entities analyzed: {all_entities_count}")
     
     # Determine which entity types were found
     for entity_type in entity_analysis.EntityTypes:

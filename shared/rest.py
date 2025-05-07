@@ -9,6 +9,7 @@ import uuid
 import time
 import base64
 from classes import STATError, STATNotFound, BaseModule, STATTooManyRequests
+import logging
 
 stat_token = {}
 graph_endpoint = os.getenv('GRAPH_ENDPOINT')
@@ -263,27 +264,56 @@ def check_app_role(base_module:BaseModule, token_type:str, app_roles:list):
         return True
     return False
 
-def get_incident_entities(base_module:BaseModule, incident_id:str):
+def get_incident_entities(base_object, incident_id):
     """
-    Retrieve entities from a specific incident
+    Get entities for a specific incident with improved error handling.
     
     Args:
-        base_module: The BaseModule containing authentication and workspace info
-        incident_id: The ID of the incident (GUID)
-        
+        base_object: The BaseModule object containing connection information
+        incident_id: The ID of the incident to retrieve entities for
+    
     Returns:
-        A list of entity objects for the incident
+        List of entity objects
     """
-    # Construct the correct API path using the workspace and subscription info from base_module
-    path = (f"/subscriptions/{base_module.SubscriptionId}/resourceGroups/{base_module.SentinelRGName}/"
-           f"providers/Microsoft.OperationalInsights/workspaces/{base_module.WorkspaceName}/"
-           f"providers/Microsoft.SecurityInsights/incidents/{incident_id}/entities?api-version=2023-02-01")
+    logging.info(f"Getting entities for incident: {incident_id}")
+    
+    # Properly format the incident ID to ensure it's a valid path
+    # If it's already a full ARM ID, use it as is
+    if incident_id.startswith('/subscriptions/'):
+        path = f"{incident_id}/entities?api-version=2023-02-01"
+    # If it's a GUID only, try to construct the path using the base incident ARM ID
+    elif base_object.IncidentARMId:
+        # Extract the base path from the current incident
+        base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
+        path = f"{base_path}/{incident_id}/entities?api-version=2023-02-01"
+    else:
+        logging.error(f"Cannot construct entity path: incident_id={incident_id}, IncidentARMId={base_object.IncidentARMId}")
+        return []
+    
+    logging.info(f"Using API path: {path}")
     
     try:
-        response = rest_call_get(base_module, 'arm', path)
-        entities_data = json.loads(response.content)
-        return entities_data.get('value', [])
+        response = rest.rest_call_get(base_object, 'arm', path)
+        
+        # Check if the request was successful
+        if response.status_code != 200:
+            logging.error(f"API Error: {response.status_code} - {response.content}")
+            return []
+        
+        # Parse the response content
+        content = json.loads(response.content)
+        
+        # Extract entities from the response
+        if 'value' in content:
+            entities = content['value']
+            logging.info(f"Successfully retrieved {len(entities)} entities")
+            return entities
+        else:
+            logging.warning(f"Unexpected response format: {json.dumps(content, indent=2)}")
+            return []
+            
     except Exception as e:
-        import logging
-        logging.warning(f"Error retrieving entities for incident {incident_id}: {str(e)}")
+        logging.error(f"Exception in get_incident_entities: {str(e)}")
+        import traceback
+        logging.error(traceback.format_exc())
         return []

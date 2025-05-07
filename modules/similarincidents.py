@@ -3,6 +3,7 @@ from shared import rest, data
 import json
 from datetime import datetime, timedelta
 import statistics
+import random
 
 def execute_similarincidents_module(req_body):
     """
@@ -50,6 +51,10 @@ def execute_similarincidents_module(req_body):
     
     # Analyze the similar incidents
     analyze_similar_incidents(similar_incidents, similar_incidents_data, current_incident)
+    
+    # Add LLM-friendly data if requested
+    if req_body.get('PrepareLLMData', False):
+        prepare_llm_data(similar_incidents, current_incident, base_object)
     
     # Add comment to the incident if requested
     if req_body.get('AddIncidentComments', True) and base_object.IncidentAvailable:
@@ -173,7 +178,7 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
         | extend SimilarityScore = 0.0
         """
     
-    # Finalize query with only the fields we care about
+    # Finalize query with sorting and limits
     query += """
     | project IncidentName, 
              IncidentNumber, 
@@ -183,10 +188,15 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
              Classification,
              ClassificationComment,
              ClassificationReason,
+             IncidentUrl,
              Tactics,
              Techniques,
+             FirstActivityTime,
+             LastActivityTime,
              CreatedTime,
+             LastModifiedTime,
              ClosedTime,
+             ResolutionTime = iff(Status == "Closed", ClosedTime, datetime(null)),
              SimilarityScore
     | order by SimilarityScore desc, CreatedTime desc
     | take maxIncidents
@@ -289,6 +299,189 @@ def analyze_similar_incidents(similar_incidents_obj, similar_incidents_data, cur
                     similar_incidents_obj.SimilarIncidentsByTactic[tactic] = []
                 similar_incidents_obj.SimilarIncidentsByTactic[tactic].append(incident)
 
+def prepare_llm_data(similar_incidents_obj, current_incident, base_object):
+    """
+    Prepare LLM-friendly data structure for incident classification prediction.
+    
+    This creates a well-structured JSON object optimized for LLM processing
+    which contains all relevant information needed to predict if an incident
+    is likely a true or false positive.
+    """
+    # Format the current incident data
+    current_incident_formatted = {
+        "title": current_incident['title'],
+        "severity": current_incident['severity'],
+        "tactics": current_incident['tactics'],
+        "description": current_incident.get('description', '')
+    }
+    
+    # Format similar incidents with their classifications
+    similar_incidents_formatted = []
+    for incident in similar_incidents_obj.DetailedResults:
+        # Format timestamps for better readability
+        created_time = format_timestamp(incident.get('CreatedTime', ''))
+        closed_time = format_timestamp(incident.get('ClosedTime', ''))
+        
+        formatted_incident = {
+            "id": incident.get('IncidentNumber', ''),
+            "title": incident.get('Title', ''),
+            "severity": incident.get('Severity', ''),
+            "status": incident.get('Status', ''),
+            "classification": incident.get('Classification', ''),
+            "classification_comment": incident.get('ClassificationComment', ''),
+            "classification_reason": incident.get('ClassificationReason', ''),
+            "similarity_score": incident.get('SimilarityScore', 0),
+            "tactics": incident.get('Tactics', []),
+            "techniques": incident.get('Techniques', []),
+            "created_time": created_time,
+            "closed_time": closed_time,
+        }
+        similar_incidents_formatted.append(formatted_incident)
+    
+    # Calculate classification distribution percentages
+    total_classified = (similar_incidents_obj.TruePositiveCount + 
+                       similar_incidents_obj.FalsePositiveCount + 
+                       similar_incidents_obj.BenignPositiveCount)
+    
+    tp_percentage = 0
+    fp_percentage = 0
+    bp_percentage = 0
+    
+    if total_classified > 0:
+        tp_percentage = (similar_incidents_obj.TruePositiveCount / total_classified) * 100
+        fp_percentage = (similar_incidents_obj.FalsePositiveCount / total_classified) * 100
+        bp_percentage = (similar_incidents_obj.BenignPositiveCount / total_classified) * 100
+    
+    # Build comprehensive statistics
+    statistics = {
+        "total_similar": similar_incidents_obj.SimilarIncidentsCount,
+        "true_positives": {
+            "count": similar_incidents_obj.TruePositiveCount,
+            "percentage": round(tp_percentage, 1)
+        },
+        "false_positives": {
+            "count": similar_incidents_obj.FalsePositiveCount,
+            "percentage": round(fp_percentage, 1)
+        },
+        "benign_positives": {
+            "count": similar_incidents_obj.BenignPositiveCount,
+            "percentage": round(bp_percentage, 1)
+        },
+        "unresolved": similar_incidents_obj.UnresolvedCount,
+        "avg_resolution_time_hours": round(similar_incidents_obj.AverageResolutionTime, 2),
+        "most_common_title": similar_incidents_obj.MostCommonTitle,
+        "most_common_tactics": similar_incidents_obj.MostCommonTactics,
+        "highest_similarity_score": similar_incidents_obj.HighestSimilarityScore
+    }
+    
+    # Get entity data for LLM context
+    entity_data = {
+        "accounts": extract_entity_data(base_object.Accounts, "Account", 5),
+        "hosts": extract_entity_data(base_object.Hosts, "Host", 5),
+        "ips": extract_entity_data(base_object.IPs, "IP", 5),
+        "domains": extract_entity_data(base_object.Domains, "Domain", 5),
+        "files": extract_entity_data(base_object.Files, "File", 5),
+        "file_hashes": extract_entity_data(base_object.FileHashes, "FileHash", 5)
+    }
+    
+    # Assemble the complete LLM data object
+    llm_data = {
+        "meta": {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "incident_id": current_incident.get('id', ''),
+            "workspace_name": base_object.WorkspaceName
+        },
+        "current_incident": current_incident_formatted,
+        "similar_incidents": similar_incidents_formatted,
+        "statistics": statistics,
+        "entities": entity_data
+    }
+    
+    # Add the data to our module object
+    similar_incidents_obj.LLMData = llm_data
+    
+    # Optionally, add a comment with the JSON data
+    if base_object.IncidentAvailable:
+        comment = f"<h3>LLM Data for Incident Classification</h3>"
+        comment += f"<p>Generated data for LLM analysis at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>"
+        comment += f"<p>Found {similar_incidents_obj.SimilarIncidentsCount} similar incidents with classifications:<br>"
+        comment += f"• True Positives: {similar_incidents_obj.TruePositiveCount} ({round(tp_percentage, 1)}%)<br>"
+        comment += f"• False Positives: {similar_incidents_obj.FalsePositiveCount} ({round(fp_percentage, 1)}%)<br>"
+        comment += f"• Benign Positives: {similar_incidents_obj.BenignPositiveCount} ({round(bp_percentage, 1)}%)</p>"
+        
+        # Add a prompt example for security analyst
+        comment += f"<h4>Example LLM Prompt:</h4>"
+        comment += f"<pre>You are a security incident analyst. Based on the attached data about a security incident and similar past incidents, determine if this is likely a true positive or false positive alert. Provide your analysis with confidence level and reasoning.</pre>"
+        
+        rest.add_incident_comment(base_object, comment)
+    
+    return llm_data
+
+def extract_entity_data(entity_list, entity_type, max_entities=5):
+    """
+    Extract the most relevant entity data in a format suitable for LLM analysis
+    """
+    formatted_entities = []
+    
+    if not entity_list or len(entity_list) == 0:
+        return formatted_entities
+    
+    # Take the first max_entities items (or all if fewer)
+    for entity in entity_list[:max_entities]:
+        entity_data = {}
+        
+        if entity_type == "Account":
+            entity_data = {
+                "upn": entity.get('userPrincipalName', ''),
+                "name": entity.get('displayName', ''),
+                "department": entity.get('department', ''),
+                "job_title": entity.get('jobTitle', ''),
+                "is_privileged": entity.get('isAADPrivileged', False),
+                "mfa_registered": entity.get('isMfaRegistered', 'Unknown')
+            }
+        elif entity_type == "Host":
+            entity_data = {
+                "hostname": entity.get('HostName', ''),
+                "fqdn": entity.get('FQDN', ''),
+                "dns_domain": entity.get('DnsDomain', '')
+            }
+        elif entity_type == "IP":
+            geo_data = entity.get('GeoData', {})
+            entity_data = {
+                "address": entity.get('Address', ''),
+                "country": geo_data.get('country', ''),
+                "city": geo_data.get('city', ''),
+                "organization": geo_data.get('organization', '')
+            }
+        elif entity_type == "Domain":
+            entity_data = {
+                "domain": entity.get('Domain', '')
+            }
+        elif entity_type == "File":
+            entity_data = {
+                "filename": entity.get('FileName', '')
+            }
+        elif entity_type == "FileHash":
+            entity_data = {
+                "hash": entity.get('FileHash', ''),
+                "algorithm": entity.get('Algorithm', '')
+            }
+        
+        formatted_entities.append(entity_data)
+    
+    return formatted_entities
+
+def format_timestamp(timestamp_str):
+    """Format timestamp for better readability"""
+    if not timestamp_str:
+        return ""
+    
+    try:
+        dt = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return timestamp_str
+
 def add_incident_comment(base_object, similar_incidents):
     """
     Add a comment to the incident with the similar incidents information.
@@ -298,11 +491,20 @@ def add_incident_comment(base_object, similar_incidents):
         rest.add_incident_comment(base_object, comment)
         return
     
-    # Create HTML table for the detailed results with only the important fields
+    # Create HTML tables for the detailed results
+    # Convert all incident URLs to hyperlinks for better usability
+    linked_incidents = []
+    for incident in similar_incidents.DetailedResults:
+        incident_copy = incident.copy()
+        if 'IncidentUrl' in incident_copy and incident_copy['IncidentUrl']:
+            incident_copy['IncidentNumber'] = f"<a href='{incident_copy['IncidentUrl']}' target='_blank'>{incident_copy['IncidentNumber']}</a>"
+        linked_incidents.append(incident_copy)
+    
     incident_table = data.list_to_html_table(
-        similar_incidents.DetailedResults, 
+        linked_incidents, 
         max_rows=20, 
         columns=['IncidentNumber', 'Title', 'Severity', 'Status', 'Classification', 'SimilarityScore'],
+        escape_html=False,
         index=False
     )
     
@@ -325,6 +527,25 @@ def add_incident_comment(base_object, similar_incidents):
     
     # Add detailed incidents table
     comment += f"<h4>Similar Incidents</h4>{incident_table}"
+    
+    # Add prediction section if LLM data is available
+    if hasattr(similar_incidents, 'LLMData'):
+        total_classified = (similar_incidents.TruePositiveCount + 
+                           similar_incidents.FalsePositiveCount + 
+                           similar_incidents.BenignPositiveCount)
+        
+        if total_classified > 0:
+            tp_percentage = (similar_incidents.TruePositiveCount / total_classified) * 100
+            fp_percentage = (similar_incidents.FalsePositiveCount / total_classified) * 100
+            bp_percentage = (similar_incidents.BenignPositiveCount / total_classified) * 100
+            
+            comment += f"<h4>Classification Statistics</h4>"
+            comment += f"<p>Based on {total_classified} classified similar incidents:</p>"
+            comment += f"<ul>"
+            comment += f"<li>True Positive likelihood: {round(tp_percentage, 1)}%</li>"
+            comment += f"<li>False Positive likelihood: {round(fp_percentage, 1)}%</li>"
+            comment += f"<li>Benign Positive likelihood: {round(bp_percentage, 1)}%</li>"
+            comment += f"</ul>"
     
     # Add the comment to the incident
     rest.add_incident_comment(base_object, comment)

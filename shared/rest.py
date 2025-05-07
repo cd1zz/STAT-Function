@@ -262,4 +262,28 @@ def check_app_role(base_module:BaseModule, token_type:str, app_roles:list):
     if matched_roles:
         return True
     return False
+
+def get_incident_entities(base_module:BaseModule, incident_id:str):
+    """
+    Retrieve entities from a specific incident
     
+    Args:
+        base_module: The BaseModule containing authentication and workspace info
+        incident_id: The ID of the incident (GUID)
+        
+    Returns:
+        A list of entity objects for the incident
+    """
+    # Construct the correct API path using the workspace and subscription info from base_module
+    path = (f"/subscriptions/{base_module.SubscriptionId}/resourceGroups/{base_module.SentinelRGName}/"
+           f"providers/Microsoft.OperationalInsights/workspaces/{base_module.WorkspaceName}/"
+           f"providers/Microsoft.SecurityInsights/incidents/{incident_id}/entities?api-version=2023-02-01")
+    
+    try:
+        response = rest_call_get(base_module, 'arm', path)
+        entities_data = json.loads(response.content)
+        return entities_data.get('value', [])
+    except Exception as e:
+        import logging
+        logging.warning(f"Error retrieving entities for incident {incident_id}: {str(e)}")
+        return []

@@ -74,15 +74,14 @@ def extract_entities_from_incidents(base_object, entity_analysis, incidents):
     
     # Process each incident to extract entities
     for incident in incidents:
-        incident_id = incident.get('IncidentNumber')
-        incident_arm_id = get_incident_arm_id(base_object, incident)
+        incident_id = incident.get('IncidentId')
         
-        if not incident_arm_id:
+        if not incident_id:
             continue
         
-        # Query incident entities
+        # Query incident entities directly using the REST API
         try:
-            incident_entities = get_incident_entities(base_object, incident_arm_id)
+            incident_entities = rest.get_incident_entities(base_object, incident_id)
             process_incident_entities(entity_analysis, incident_entities, incident_id)
             all_entities_count += len(incident_entities)
         except Exception as e:
@@ -94,64 +93,6 @@ def extract_entities_from_incidents(base_object, entity_analysis, incidents):
     for entity_type in entity_analysis.EntityTypes:
         if entity_analysis.EntitiesByType.get(entity_type) and len(entity_analysis.EntitiesByType[entity_type]) > 0:
             entity_analysis.EntityTypesFound.append(entity_type)
-
-def get_incident_arm_id(base_object, incident):
-    """
-    Get the ARM ID for an incident to query its entities
-    """
-    incident_id = incident.get('IncidentNumber')
-    incident_url = incident.get('IncidentUrl', '')
-    
-    # Try to extract from URL
-    if incident_url and '/incident/' in incident_url:
-        try:
-            parts = incident_url.split('/incident/')
-            if len(parts) > 1:
-                arm_id_parts = parts[1].split('?')[0].split('/')
-                # Format varies depending on portal URL structure
-                # This is a simplified approach - may need adjustment for actual URL format
-                arm_components = [
-                    "subscriptions", arm_id_parts[0],
-                    "resourceGroups", base_object.SentinelRGName,
-                    "providers", "Microsoft.OperationalInsights",
-                    "workspaces", base_object.WorkspaceName,
-                    "providers", "Microsoft.SecurityInsights",
-                    "incidents", arm_id_parts[-1]
-                ]
-                return "/" + "/".join(arm_components)
-        except:
-            pass
-    
-    # If URL extraction failed, try to get from incident name
-    query = f"""
-    SecurityIncident
-    | where IncidentNumber == {incident_id}
-    | project IncidentName
-    """
-    
-    try:
-        results = rest.execute_la_query(base_object, query, 90)
-        if results and 'IncidentName' in results[0]:
-            return results[0]['IncidentName']
-    except:
-        pass
-    
-    return None
-
-def get_incident_entities(base_object, incident_arm_id):
-    """
-    Retrieve entities from a specific incident
-    """
-    # Query entities for this incident
-    path = f"{incident_arm_id}/entities?api-version=2023-02-01"
-    
-    try:
-        response = rest.rest_call_get(base_object, 'arm', path)
-        entities_data = json.loads(response.content)
-        return entities_data.get('value', [])
-    except Exception as e:
-        logging.warning(f"Error retrieving entities: {str(e)}")
-        return []
 
 def process_incident_entities(entity_analysis, incident_entities, incident_id):
     """
@@ -234,7 +175,7 @@ def process_filehash_entity(entity_analysis, properties, incident_id):
 
 def process_file_entity(entity_analysis, properties, incident_id):
     """Process file entity"""
-    file_name = properties.get('friendlyName', '')
+    file_name = properties.get('fileName', properties.get('friendlyName', ''))
     
     if file_name:
         add_entity_to_analysis(entity_analysis, 'File', file_name, incident_id, 'FileName')

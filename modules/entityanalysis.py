@@ -78,7 +78,7 @@ def execute_entityanalysis_module(req_body):
         )
     
     # Add the condensed summary for LLM processing if requested
-    if req_body.get('PrepareLLMData', False):
+    if req_body.get('PrepareLLMData', True):
         # Extract classification patterns
         classification_patterns = extract_classification_patterns(entity_analysis, detailed_results)
         

@@ -28,7 +28,7 @@ def execute_entityanalysis_module(req_body):
     max_retries = req_body.get('MaxRetries', 3)
     retry_delay = req_body.get('RetryDelay', 5)
     use_kql_fallback = req_body.get('UseKQLFallback', True)
-    api_version = req_body.get('APIVersion', '2023-02-01')
+    api_version = req_body.get('APIVersion', '2025-03-01')
     
     # Load data from the similar incidents module
     similar_incidents_data = req_body.get('SimilarIncidentsData', {})
@@ -82,7 +82,7 @@ def extract_entities_from_incidents(
     max_retries=3, 
     retry_delay=5, 
     use_kql_fallback=True,
-    api_version='2023-02-01'
+    api_version='2025-03-01'
 ):
     """
     Extract entities from each incident and organize them by type.
@@ -146,7 +146,7 @@ def extract_entities_from_incidents(
         if entity_analysis.EntitiesByType.get(entity_type) and len(entity_analysis.EntitiesByType[entity_type]) > 0:
             entity_analysis.EntityTypesFound.append(entity_type)
 
-def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5, api_version='2023-02-01'):
+def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5, api_version='2025-03-01'):
     """
     Get entities for a specific incident using the direct REST API approach.
     
@@ -238,7 +238,7 @@ def get_entities_via_expansion(base_object, incident_id, max_retries=3, retry_de
         # First get the security alert ID from incident relations
         if base_object.IncidentARMId:
             base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
-            relations_path = f"{base_path}/{incident_id}/relations?api-version=2023-02-01"
+            relations_path = f"{base_path}/{incident_id}/relations?api-version=2025-03-01"
             
             logging.info(f"Getting incident relations: {relations_path}")
             
@@ -262,7 +262,7 @@ def get_entities_via_expansion(base_object, incident_id, max_retries=3, retry_de
                             
                             # Now use the expansion ID approach
                             expansion_id = "98b974fd-cc64-48b8-9bd0-3a209f5b944b"  # Special hardcoded GUID
-                            expand_path = f"{base_path}/providers/Microsoft.SecurityInsights/entities/{security_alert_id}/expand?api-version=2023-02-01"
+                            expand_path = f"{base_path}/providers/Microsoft.SecurityInsights/entities/{security_alert_id}/expand?api-version=2025-03-01"
                             expand_body = {'expansionId': expansion_id}
                             
                             logging.info(f"Using expand path: {expand_path}")

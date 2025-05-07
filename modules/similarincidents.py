@@ -65,7 +65,7 @@ def get_current_incident_details(base_object):
     """
     Retrieve details about the current incident for comparison.
     """
-    path = f'{base_object.IncidentARMId}?api-version=2023-02-01'
+    path = f'{base_object.IncidentARMId}?api-version=2025-03-01'
     current_incident = json.loads(rest.rest_call_get(base_object, 'arm', path).content)
     
     # Extract tactics from the related analytic rules

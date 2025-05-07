@@ -303,13 +303,6 @@ def get_entities_via_kql(base_object, incident):
     """
     Fallback approach to extract entities using KQL queries.
     This approach queries the SecurityAlert table directly.
-    
-    Args:
-        base_object: The BaseModule object
-        incident: The incident data
-    
-    Returns:
-        List of entity objects
     """
     logging.info("Attempting to extract entities via KQL query fallback")
     
@@ -324,115 +317,163 @@ def get_entities_via_kql(base_object, incident):
         if incident_number or incident_title:
             # Construct KQL query to find related alerts with entities
             if incident_number:
+                # Using correct schema columns as per provided information
                 query = f"""
                 SecurityIncident
                 | where IncidentNumber == {incident_number}
-                | join kind=inner (
-                    AlertInfo
-                    | where TimeGenerated > ago(90d)
-                ) on $left.IncidentName == $right.IncidentName
-                | project AlertName, AlertSeverity, TimeGenerated
+                | project IncidentName, AlertIds
+                | mv-expand AlertIds
                 | join kind=inner (
                     SecurityAlert
-                    | where TimeGenerated > ago(90d)
-                    | extend Entities = parse_json(Entities)
-                ) on AlertName
+                    | where TimeGenerated > ago(14d)
+                    | extend AlertId = SystemAlertId
+                ) on $left.AlertIds == $right.AlertId
                 | project TimeGenerated, AlertName, AlertSeverity, Entities
-                | mv-expand Entities
+                | where isnotempty(Entities)
+                | extend EntitiesObj = parse_json(Entities)
+                | mv-expand EntitiesObj
+                | extend EntityType = tostring(EntitiesObj.Type)
+                | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
+                | limit 50
                 """
             else:
                 # Use title as a fallback (less precise)
                 sanitized_title = incident_title.replace("'", "''")
                 query = f"""
                 SecurityAlert
-                | where TimeGenerated > ago(90d)
+                | where TimeGenerated > ago(14d)
                 | where AlertName has '{sanitized_title}'
-                | extend Entities = parse_json(Entities)
-                | mv-expand Entities
-                """
-            
-            # Execute the KQL query
-            results = rest.execute_la_query(base_object, query, 90)
-            
-            if results:
-                logging.info(f"KQL query returned {len(results)} entity records")
-                
-                # Process each entity into our standard format
-                for result in results:
-                    if 'Entities' in result:
-                        entity_data = result['Entities']
-                        
-                        # Convert from KQL result format to the standard API format
-                        entity_obj = {
-                            'kind': entity_data.get('Type', '').lower(),
-                            'properties': {}
-                        }
-                        
-                        # Map common entity properties based on type
-                        if entity_obj['kind'] == 'account':
-                            entity_obj['properties'] = {
-                                'accountName': entity_data.get('Name'),
-                                'userPrincipalName': entity_data.get('UPNSuffix', ''),
-                                'friendlyName': entity_data.get('DisplayName', entity_data.get('Name', '')),
-                                'sid': entity_data.get('Sid', '')
-                            }
-                        elif entity_obj['kind'] == 'host':
-                            entity_obj['properties'] = {
-                                'hostName': entity_data.get('HostName', entity_data.get('NetBiosName', '')),
-                                'netBiosName': entity_data.get('NetBiosName', ''),
-                                'fqdn': entity_data.get('FQDN', '')
-                            }
-                        elif entity_obj['kind'] == 'ip':
-                            entity_obj['properties'] = {
-                                'address': entity_data.get('Address')
-                            }
-                        elif entity_obj['kind'] in ['dns', 'dnsresolution']:
-                            entity_obj['properties'] = {
-                                'domainName': entity_data.get('DomainName')
-                            }
-                        elif entity_obj['kind'] == 'url':
-                            entity_obj['properties'] = {
-                                'url': entity_data.get('Url')
-                            }
-                        elif entity_obj['kind'] == 'filehash':
-                            entity_obj['properties'] = {
-                                'hashValue': entity_data.get('Value'),
-                                'algorithm': entity_data.get('Algorithm', '')
-                            }
-                        elif entity_obj['kind'] == 'file':
-                            entity_obj['properties'] = {
-                                'fileName': entity_data.get('Name'),
-                                'friendlyName': entity_data.get('Name')
-                            }
-                        
-                        entities.append(entity_obj)
-            else:
-                logging.warning("KQL query returned no results")
-                
-                # Try a broader fallback query
-                fallback_query = f"""
-                SecurityAlert
-                | where TimeGenerated > ago(90d)
-                | where ProviderName has "Microsoft" 
-                | extend Entities = parse_json(Entities)
-                | mv-expand Entities
+                | project TimeGenerated, AlertName, AlertSeverity, Entities
+                | where isnotempty(Entities)
+                | extend EntitiesObj = parse_json(Entities)
+                | mv-expand EntitiesObj
+                | extend EntityType = tostring(EntitiesObj.Type)
+                | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
                 | limit 50
                 """
+            
+            # Execute the KQL query with reduced time range
+            try:
+                results = rest.execute_la_query(base_object, query, 14)
+                logging.info(f"KQL query returned {len(results)} records")
                 
-                fallback_results = rest.execute_la_query(base_object, fallback_query, 90)
-                
-                if fallback_results:
-                    logging.info(f"Broader KQL fallback query returned {len(fallback_results)} entity records")
-                    
-                    # Process fallback entities (same logic as above)
-                    for result in fallback_results:
-                        if 'Entities' in result:
-                            entity_data = result['Entities']
+                if results:
+                    # Process each entity into our standard format
+                    for result in results:
+                        if 'EntityDetails' in result:
+                            entity_data = result['EntityDetails']
+                            entity_type = result.get('EntityType', '').lower()
+                            
+                            # Convert from KQL result format to the standard API format
                             entity_obj = {
-                                'kind': entity_data.get('Type', '').lower(),
-                                'properties': entity_data
+                                'kind': entity_type,
+                                'properties': {}
                             }
+                            
+                            # Map common entity properties based on type
+                            if entity_type == 'account':
+                                entity_obj['properties'] = {
+                                    'accountName': entity_data.get('Name'),
+                                    'userPrincipalName': entity_data.get('UPNSuffix', ''),
+                                    'friendlyName': entity_data.get('DisplayName', entity_data.get('Name', '')),
+                                    'sid': entity_data.get('Sid', '')
+                                }
+                            elif entity_type == 'host':
+                                entity_obj['properties'] = {
+                                    'hostName': entity_data.get('HostName', entity_data.get('NetBiosName', '')),
+                                    'netBiosName': entity_data.get('NetBiosName', ''),
+                                    'fqdn': entity_data.get('FQDN', '')
+                                }
+                            elif entity_type == 'ip':
+                                entity_obj['properties'] = {
+                                    'address': entity_data.get('Address')
+                                }
+                            elif entity_type in ['dns', 'dnsresolution']:
+                                entity_obj['properties'] = {
+                                    'domainName': entity_data.get('DomainName')
+                                }
+                            elif entity_type == 'url':
+                                entity_obj['properties'] = {
+                                    'url': entity_data.get('Url')
+                                }
+                            elif entity_type == 'filehash':
+                                entity_obj['properties'] = {
+                                    'hashValue': entity_data.get('Value'),
+                                    'algorithm': entity_data.get('Algorithm', '')
+                                }
+                            elif entity_type == 'file':
+                                entity_obj['properties'] = {
+                                    'fileName': entity_data.get('Name'),
+                                    'friendlyName': entity_data.get('Name')
+                                }
+                            
                             entities.append(entity_obj)
+                
+                else:
+                    logging.warning("KQL query returned no results")
+                    
+                    # Try a broader fallback query if the first attempts fail
+                    fallback_query = """
+                    SecurityAlert
+                    | where TimeGenerated > ago(7d)
+                    | where isnotempty(Entities)
+                    | extend EntitiesObj = parse_json(Entities)
+                    | mv-expand EntitiesObj
+                    | extend EntityType = tostring(EntitiesObj.Type)
+                    | project TimeGenerated, AlertName, AlertSeverity, EntityType, EntityDetails = EntitiesObj
+                    | limit 30
+                    """
+                    
+                    fallback_results = rest.execute_la_query(base_object, fallback_query, 7)
+                    
+                    if fallback_results:
+                        logging.info(f"Fallback query returned {len(fallback_results)} records")
+                        
+                        # Process entities from fallback query (same logic as above)
+                        for result in fallback_results:
+                            if 'EntityDetails' in result:
+                                entity_data = result['EntityDetails']
+                                entity_type = result.get('EntityType', '').lower()
+                                
+                                entity_obj = {
+                                    'kind': entity_type,
+                                    'properties': entity_data
+                                }
+                                entities.append(entity_obj)
+            
+            except Exception as e:
+                logging.error(f"Error executing KQL query: {str(e)}")
+                
+                # Add a simpler fallback query with basic structure
+                try:
+                    simple_query = """
+                    SecurityAlert
+                    | where TimeGenerated > ago(7d)
+                    | where isnotempty(Entities)
+                    | extend EntitiesObj = parse_json(Entities)
+                    | mv-expand EntitiesObj
+                    | project EntityDetails = EntitiesObj
+                    | limit 20
+                    """
+                    
+                    simple_results = rest.execute_la_query(base_object, simple_query, 7)
+                    
+                    if simple_results:
+                        logging.info(f"Simple fallback query returned {len(simple_results)} records")
+                        for result in simple_results:
+                            if 'EntityDetails' in result:
+                                entity_data = result['EntityDetails']
+                                entity_type = entity_data.get('Type', '').lower()
+                                
+                                entity_obj = {
+                                    'kind': entity_type,
+                                    'properties': entity_data
+                                }
+                                entities.append(entity_obj)
+                
+                except Exception as simple_error:
+                    logging.error(f"Even simple fallback query failed: {str(simple_error)}")
+        
         else:
             logging.warning("Cannot perform KQL query: missing incident number and title")
     

@@ -213,7 +213,7 @@ def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5,
                     logging.error(traceback.format_exc())
     
     except Exception as e:
-        logging.error(f"Failed to extract entities via API: {str(e)}")
+        logging.error(f"Failed to extract entities via API: {str(e)}\nAPI endpoint: {path}")
         logging.error(traceback.format_exc())
     
     return []
@@ -472,13 +472,13 @@ def get_entities_via_kql(base_object, incident):
                                 entities.append(entity_obj)
                 
                 except Exception as simple_error:
-                    logging.error(f"Even simple fallback query failed: {str(simple_error)}")
+                    logging.error(f"Fallback KQL query failed: {str(simple_error)}\nQuery: {query}")
         
         else:
             logging.warning("Cannot perform KQL query: missing incident number and title")
     
     except Exception as e:
-        logging.error(f"Failed to extract entities via KQL: {str(e)}")
+        logging.error(f"Failed to extract entities via KQL: {str(e)}\nQuery: {query}")
         logging.error(traceback.format_exc())
     
     logging.info(f"KQL approach extracted {len(entities)} entities")

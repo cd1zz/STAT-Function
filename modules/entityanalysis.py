@@ -181,7 +181,7 @@ def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5,
         # Implement retry logic
         for attempt in range(max_retries):
             try:
-                response = rest.rest_call_get(base_object, 'arm', path)
+                response = rest.rest_call_post(base_object, 'arm', path, {})
                 
                 # Check if the request was successful
                 if response.status_code == 200:

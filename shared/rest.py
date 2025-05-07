@@ -1,3 +1,5 @@
+import time
+import traceback
 from azure.identity import DefaultAzureCredential, ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 import requests
@@ -264,13 +266,16 @@ def check_app_role(base_module:BaseModule, token_type:str, app_roles:list):
         return True
     return False
 
-def get_incident_entities(base_object, incident_id):
+def get_incident_entities(base_object, incident_id, max_retries=3, retry_delay=5, api_version='2023-02-01'):
     """
     Get entities for a specific incident with improved error handling.
     
     Args:
         base_object: The BaseModule object containing connection information
         incident_id: The ID of the incident to retrieve entities for
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        api_version: API version to use for the request
     
     Returns:
         List of entity objects
@@ -278,43 +283,56 @@ def get_incident_entities(base_object, incident_id):
     logging.info(f"Getting entities for incident: {incident_id}")
     
     # Properly format the incident ID to ensure it's a valid path
-    # If it's already a full ARM ID, use it as is
-    if incident_id.startswith('/subscriptions/'):
-        path = f"{incident_id}/entities?api-version=2023-02-01"
-    # If it's a GUID only, try to construct the path using the base incident ARM ID
-    elif base_object.IncidentARMId:
-        # Extract the base path from the current incident
-        base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
-        path = f"{base_path}/{incident_id}/entities?api-version=2023-02-01"
-    else:
-        logging.error(f"Cannot construct entity path: incident_id={incident_id}, IncidentARMId={base_object.IncidentARMId}")
-        return []
-    
-    logging.info(f"Using API path: {path}")
-    
     try:
-        # Use rest_call_get directly without the module reference
-        response = rest_call_get(base_object, 'arm', path)
-        
-        # Check if the request was successful
-        if response.status_code != 200:
-            logging.error(f"API Error: {response.status_code} - {response.content}")
-            return []
-        
-        # Parse the response content
-        content = json.loads(response.content)
-        
-        # Extract entities from the response
-        if 'value' in content:
-            entities = content['value']
-            logging.info(f"Successfully retrieved {len(entities)} entities")
-            return entities
+        # If it's already a full ARM ID, use it as is
+        if incident_id.startswith('/subscriptions/'):
+            path = f"{incident_id}/entities?api-version={api_version}"
+        # If it's a GUID only, try to construct the path using the base incident ARM ID
+        elif base_object.IncidentARMId:
+            # Extract the base path from the current incident
+            base_path = '/'.join(base_object.IncidentARMId.split('/')[:-1])
+            path = f"{base_path}/{incident_id}/entities?api-version={api_version}"
         else:
-            logging.warning(f"Unexpected response format: {json.dumps(content, indent=2)}")
+            logging.error(f"Cannot construct entity path: incident_id={incident_id}, IncidentARMId={base_object.IncidentARMId}")
             return []
-            
+        
+        logging.info(f"Using API path: {path}")
+        
+        # Implement retry logic
+        for attempt in range(max_retries):
+            try:
+                response = rest_call_get(base_object, 'arm', path)
+                
+                # Check if the request was successful
+                if response.status_code == 200:
+                    # Parse the response content
+                    content = json.loads(response.content)
+                    
+                    # Extract entities from the response
+                    if 'value' in content:
+                        entities = content['value']
+                        logging.info(f"Successfully retrieved {len(entities)} entities")
+                        return entities
+                    else:
+                        logging.warning(f"Response contained no 'value' key: {response.content[:200]}")
+                else:
+                    logging.warning(f"API Error: {response.status_code}")
+                    
+                # Wait before retrying
+                if attempt < max_retries - 1:
+                    logging.info(f"Retrying API call after {retry_delay} seconds (attempt {attempt+1}/{max_retries})")
+                    time.sleep(retry_delay)
+                
+            except Exception as e:
+                logging.error(f"Exception in get_incident_entities: {str(e)}")
+                if attempt < max_retries - 1:
+                    logging.info(f"Retrying after {retry_delay} seconds (attempt {attempt+1}/{max_retries})")
+                    time.sleep(retry_delay)
+                else:
+                    logging.error(traceback.format_exc())
+    
     except Exception as e:
-        logging.error(f"Exception in get_incident_entities: {str(e)}")
-        import traceback
+        logging.error(f"Failed to construct entity path: {str(e)}")
         logging.error(traceback.format_exc())
-        return []
+        
+    return []

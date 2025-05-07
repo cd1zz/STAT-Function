@@ -4,7 +4,6 @@ import json
 import logging
 import traceback
 import time
-import random
 
 def execute_entityanalysis_module(req_body):
     """
@@ -194,8 +193,13 @@ def get_entities_via_api(base_object, incident_id, max_retries=3, retry_delay=5,
                         entities = content['value']
                         logging.info(f"Successfully retrieved {len(entities)} entities via API")
                         return entities
+                    # Handle the alternate response format where entities are under "entities" key
+                    elif 'entities' in content:
+                        entities = content['entities']
+                        logging.info(f"Successfully retrieved {len(entities)} entities via alternate API structure")
+                        return entities
                     else:
-                        logging.warning(f"Response contained no 'value' key: {str(content)[:200]}")
+                        logging.warning(f"Response contained no 'value' or 'entities' key: {str(content)[:200]}")
                 else:
                     logging.warning(f"API returned non-200 status: {response.status_code}")
                     # Check if it's a rate limiting issue

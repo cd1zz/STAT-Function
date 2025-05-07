@@ -27,7 +27,6 @@ def execute_entityanalysis_module(req_body):
     min_entity_frequency = req_body.get('MinEntityFrequency', 2)
     max_retries = req_body.get('MaxRetries', 3)
     retry_delay = req_body.get('RetryDelay', 5)
-    use_kql_fallback = req_body.get('UseKQLFallback', True)
     api_version = req_body.get('APIVersion', '2025-03-01')
     
     # Load data from the similar incidents module
@@ -48,7 +47,6 @@ def execute_entityanalysis_module(req_body):
         detailed_results, 
         max_retries, 
         retry_delay, 
-        use_kql_fallback,
         api_version
     )
     

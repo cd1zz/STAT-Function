@@ -22,6 +22,7 @@ def execute_similarincidents_module(req_body):
     lookback_days = req_body.get('LookbackInDays', 90)
     similarity_threshold = req_body.get('SimilarityThreshold', 0.5)
     max_incidents = req_body.get('MaxIncidents', 50)
+    api_version = req_body.get('APIVersion', '2024-09-01')
     
     # Get match parameters
     match_by_entity = req_body.get('MatchByEntity', False)  # Entities not directly in incident
@@ -33,7 +34,7 @@ def execute_similarincidents_module(req_body):
         raise STATError('There is no incident associated with this STAT triage. Unable to find similar incidents.')
     
     # Gather data from the current incident
-    current_incident = get_current_incident_details(base_object)
+    current_incident = get_current_incident_details(base_object, api_version)
     
     # Search for similar incidents
     similar_incidents_data = search_similar_incidents(
@@ -61,11 +62,11 @@ def execute_similarincidents_module(req_body):
     
     return Response(similar_incidents)
 
-def get_current_incident_details(base_object):
+def get_current_incident_details(base_object, api_version):
     """
     Retrieve details about the current incident for comparison.
     """
-    path = f'{base_object.IncidentARMId}?api-version=2025-03-01'
+    path = f'{base_object.IncidentARMId}?api-version={api_version}'
     current_incident = json.loads(rest.rest_call_get(base_object, 'arm', path).content)
     
     # Extract tactics from the related analytic rules
@@ -172,7 +173,7 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
         | extend SimilarityScore = 0.0
         """
     
-    # Finalize query with sorting and limits
+    # Finalize query with only the fields we care about
     query += """
     | project IncidentName, 
              IncidentNumber, 
@@ -182,15 +183,10 @@ def search_similar_incidents(base_object, current_incident, lookback_days, simil
              Classification,
              ClassificationComment,
              ClassificationReason,
-             IncidentUrl,
              Tactics,
              Techniques,
-             FirstActivityTime,
-             LastActivityTime,
              CreatedTime,
-             LastModifiedTime,
              ClosedTime,
-             ResolutionTime = iff(Status == "Closed", ClosedTime, datetime(null)),
              SimilarityScore
     | order by SimilarityScore desc, CreatedTime desc
     | take maxIncidents
@@ -235,10 +231,10 @@ def analyze_similar_incidents(similar_incidents_obj, similar_incidents_data, cur
     # Find resolution times for closed incidents
     resolution_times = []
     for incident in similar_incidents_data:
-        if incident.get('Status') == 'Closed' and incident.get('ResolutionTime') and incident.get('CreatedTime'):
+        if incident.get('Status') == 'Closed' and incident.get('ClosedTime') and incident.get('CreatedTime'):
             try:
                 created = datetime.strptime(incident.get('CreatedTime'), "%Y-%m-%dT%H:%M:%S.%fZ")
-                resolved = datetime.strptime(incident.get('ResolutionTime'), "%Y-%m-%dT%H:%M:%S.%fZ")
+                resolved = datetime.strptime(incident.get('ClosedTime'), "%Y-%m-%dT%H:%M:%S.%fZ")
                 resolution_time_hours = (resolved - created).total_seconds() / 3600
                 resolution_times.append(resolution_time_hours)
             except ValueError:
@@ -302,20 +298,11 @@ def add_incident_comment(base_object, similar_incidents):
         rest.add_incident_comment(base_object, comment)
         return
     
-    # Create HTML tables for the detailed results
-    # Convert all incident URLs to hyperlinks for better usability
-    linked_incidents = []
-    for incident in similar_incidents.DetailedResults:
-        incident_copy = incident.copy()
-        if 'IncidentUrl' in incident_copy and incident_copy['IncidentUrl']:
-            incident_copy['IncidentNumber'] = f"<a href='{incident_copy['IncidentUrl']}' target='_blank'>{incident_copy['IncidentNumber']}</a>"
-        linked_incidents.append(incident_copy)
-    
+    # Create HTML table for the detailed results with only the important fields
     incident_table = data.list_to_html_table(
-        linked_incidents, 
+        similar_incidents.DetailedResults, 
         max_rows=20, 
         columns=['IncidentNumber', 'Title', 'Severity', 'Status', 'Classification', 'SimilarityScore'],
-        escape_html=False,
         index=False
     )
     
